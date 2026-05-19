@@ -377,15 +377,14 @@ vec2 voxelToAtlasUV(vec3 uvw) {
 }`;
 
 const VERT = `
-// instanceMatrix must be declared explicitly when using ShaderMaterial + InstancedMesh.
-// (Three.js auto-injects it only for the built-in materials.)
-attribute mat4 instanceMatrix;
+// instanceMatrix is auto-prepended by Three.js for ShaderMaterial + InstancedMesh
+// — declaring it ourselves would be a duplicate-attribute GLSL compile error
+// and silently kill the vertex shader.
 attribute vec3 instanceUvw;
 varying vec3 vUvw;
 void main() {
     vUvw = instanceUvw;
-    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
 }`;
 
 const FRAG_SUMMARY = `

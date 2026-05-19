@@ -97,14 +97,15 @@ cubesMesh.geometry.setAttribute('instanceUvw', cubeUvwAttr);
 // Canonical-pass material: fragment outputs vec3(vUvw) / 255 → byte-perfect
 // identity for resolutions ≤ 256. The framebuffer pixel under the cursor
 // IS the voxel coord — no inverse projection, no raycast.
+// (instanceMatrix is auto-prepended by Three.js for ShaderMaterial + InstancedMesh;
+//  declaring it explicitly causes a duplicate-attribute compile error.)
 const matCanonical = new THREE.ShaderMaterial({
   vertexShader: /* glsl */ `
-    attribute mat4 instanceMatrix;
     attribute vec3 instanceUvw;
     varying vec3 vUvw;
     void main() {
       vUvw = instanceUvw;
-      gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
     }
   `,
   fragmentShader: /* glsl */ `
