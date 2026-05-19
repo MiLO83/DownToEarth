@@ -24,14 +24,23 @@ def propagate(
     depth: np.ndarray,    # (H, W) meters; NaN = no information
     semantic: np.ndarray, # (H, W) class IDs (int8)
     rgb: np.ndarray | None = None,  # (H, W, 3) float 0..1; per-pixel inpaint color
+    unknown_mask: np.ndarray | None = None,  # (H, W) bool; True where the pre-inpaint render saw nothing
     weight_at_camera: int = 3,
     ray_carve: bool = True,
     carve_step_m: float = 0.15,
     sample_stride: int = 2,
     carve_weight: float = 0.3,           # empty vote weight — much less than occupancy
     carve_respect_threshold: float = 0.65, # don't carve through cells already confidently non-empty
+    gate_on_unknown_mask: bool = True,    # Lyra-2-style: only vote where the original render had a hole
 ) -> dict:
     """Project pixels into voxel votes.
+
+    When `gate_on_unknown_mask=True` and `unknown_mask` is provided, votes are
+    written ONLY for pixels that were originally unknown (i.e. the inpaint
+    actually invented something there). Pixels the renderer already saw cleanly
+    are not re-voted — the existing voxel histogram for those cells is sacred.
+    This matches Lyra 2's "fill holes, don't re-imagine known geometry" loop
+    and is what stops iterations from diluting the bootstrap into mush.
 
     Returns counters for debug: cells_voted, cells_carved.
     """
@@ -44,6 +53,8 @@ def propagate(
 
     cells_voted = 0
     cells_carved = 0
+    cells_skipped_already_known = 0
+    apply_gate = gate_on_unknown_mask and unknown_mask is not None
 
     # Precompute the per-pixel ray direction (in world space) via inverse
     # projection of NDC corners → camera space → world space.
@@ -73,6 +84,13 @@ def propagate(
     sample_xs = np.arange(0, W, sample_stride)
     for sy, py in enumerate(sample_ys):
         for sx, px in enumerate(sample_xs):
+            # Lyra-2-style hole-only voting: skip pixels the renderer already saw.
+            # The inpaint output at known pixels is at best a noisy reproduction
+            # of existing voxels (depth ControlNet anchored it back to whatever
+            # we showed it); re-voting those pixels is what dilutes the histogram.
+            if apply_gate and not bool(unknown_mask[py, px]):
+                cells_skipped_already_known += 1
+                continue
             d = float(depth[py, px])
             cls = int(semantic[py, px])
             if cls == 1:    # sky — vote the ray's "far" voxel as sky but don't terminate
@@ -127,4 +145,8 @@ def propagate(
                     store.vote(cidx, 0, weight=carve_weight)
                     cells_carved += 1
 
-    return {"cells_voted": cells_voted, "cells_carved": cells_carved}
+    return {
+        "cells_voted": cells_voted,
+        "cells_carved": cells_carved,
+        "cells_skipped_already_known": cells_skipped_already_known,
+    }

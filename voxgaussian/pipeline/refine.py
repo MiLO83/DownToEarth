@@ -209,11 +209,16 @@ def run_refinement(
                         "far": camera.far,
                     }, f)
 
-        # 4. Project the inpainted view back into voxel votes
+        # 4. Project the inpainted view back into voxel votes — but only at
+        # pixels that were originally unknown (Lyra-2 fill-holes semantics).
+        # Pixels the renderer already saw cleanly are NOT re-voted; their
+        # existing histogram entries are kept intact across iterations.
         result = propagate(store, camera, inpainted_depth, inpainted_sem,
                            rgb=inpainted_rgb,
+                           unknown_mask=rendered["unknown_mask"],
                            ray_carve=not no_inpaint)
-        print(f"  propagate: voted={result['cells_voted']} carved={result['cells_carved']}")
+        print(f"  propagate: voted={result['cells_voted']} carved={result['cells_carved']}"
+              f" gated={result.get('cells_skipped_already_known', 0)}")
 
         # 5. Convergence check
         curr_sig = voxel_state_signature(store)
@@ -331,6 +336,11 @@ def main():
     ap.add_argument("--no-live", action="store_true",
                     help="Don't start the live WebSocket viewer server")
     ap.add_argument("--comfyui", default="http://127.0.0.1:8188")
+    ap.add_argument("--snapshot-downsample", type=int, default=2,
+                    help="Coarseness factor for the live-viewer snapshot. 1 = "
+                         "full voxel grid (slower stream, finer cubes); 2 = "
+                         "default 2× downsample; 4 = chunky-cube debug mode. "
+                         "If iter 0 looks too coarse in the viewer, try --snapshot-downsample 1.")
     args = ap.parse_args()
 
     scene_image = REPO / "assets-raw" / args.scene / "scene.png"
@@ -351,6 +361,7 @@ def main():
         tolerance=args.tolerance,
         min_iterations=args.min_iterations,
         comfyui_url=args.comfyui,
+        snapshot_downsample=args.snapshot_downsample,
         no_inpaint=args.no_inpaint,
         bootstrap_only=args.bootstrap_only,
         live=not args.no_live,
