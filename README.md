@@ -601,42 +601,54 @@ python -m voxgaussian.pipeline.uvw_atlas
 #   Exhaustive bijection check (256³ pairs)... OK
 ```
 
-### Continuous self-improve mode (local)
+### Project status: locked at iter 1 (with the Lyra-2-shaped scaffolding in place)
 
-Run the refinement loop until you decide it's good enough. The pipeline picks
-a fresh camera angle each iteration, renders the current voxel state from
-there, sends unknowns through ControlNet inpaint, votes the corrections back
-into the per-voxel histograms, ray-carves empty space along the ray, and
-broadcasts a snapshot to the live viewer. Then repeats. Forever.
+After exploring iterative refinement on a consumer-grade backbone
+(Juggernaut XL), we've landed on a deliberate stopping point: **the
+pipeline locks at `--max-iterations 1` by default and the deployed
+demo serves the iter-1 baked Gaussian cloud**. Bootstrap + one
+corroborating inpaint pass is the quality plateau on this hardware
+class — iter 2+ degrades the result even with all three of the
+Lyra-2-style architectural fixes wired in.
+
+**Architectural pieces that did ship and stay in the code:**
+
+| Fix | Layer | What it does |
+|---|---|---|
+| Canonical-coord ControlNet anchor | inpaint conditioning | Renders the current voxel state with each pixel's RGB = its voxel coord, feeds it as a second ControlNet so the diffusion model is told "non-black pixels are locked geometry, only fill black holes." Wired via `workflows/depth_semantic_inpaint.json` node 31/61. |
+| Fill-holes vote gating | propagate loop | `propagate.py` skips voting for pixels that the original render already saw cleanly — only the genuine disocclusion holes get written back. Stops histogram dilution. |
+| 50/50 found-vs-unfound view selection | camera picking | `select_view.py` probe-renders each candidate at 32² and scores by `sqrt(found × unfound)`. Geometric mean peaks when the frame has half-context, half-holes — the sweet spot for inpaint anchoring. |
+| UVW bijection / atlas | data structure | The bidirectional voxel ↔ RGB packing is the foundation everything else stands on. See `pipeline/uvw_atlas.py` and the UVW explainer demo. |
+
+**What we decided NOT to pursue (and why):**
+
+- **Cloning NVIDIA Lyra 2.0.** Research-only license; cannot be
+  distributed, deployed, or sublicensed. Would also need an H100 /
+  GB200 to run. Out of scope.
+- **GEN3C-Cosmos-7B as an inpaint backend.** Realistic alternative
+  with a usable license, similar pattern, ~RTX-class hardware. Not
+  pursued in this round; documented as the natural Option B if
+  someone wants to push past the current quality ceiling.
+- **Continuous self-improve mode.** We had a WebSocket STOP button
+  and `--continuous` flag wired up for "run until satisfied"; both
+  the button (in the live viewer) and the codepath (`stop_requested`
+  in `refine.py`) remain in place for graceful aborts, but the CLI
+  flag is gone and iter 2+ runs are research-only.
+
+**The live demos at https://downtoearth-9lq.pages.dev are the
+canonical outputs.** The 167k-Gaussian photoreal scene is an iter-1
+bake. Rebuilding it from scratch:
 
 ```powershell
 cd voxgaussian
-python -m pipeline.refine --scene hamlet-square --continuous
-# (or: --max-iterations 0 — same effect)
-```
-
-Open http://localhost:5174 in a browser. A red **⏸ STOP REFINE** button
-appears below the OCCUPANCY/UVW/GAUSSIAN mode toggle (only visible when the
-WebSocket is connected — so visitors on the public pages.dev URL never see
-a dead control).
-
-When you're satisfied with the convergence, click STOP. The pipeline:
-1. Finishes its in-flight iteration
-2. Runs Phase B (`texture_pass.py` → per-voxel RGB, then `gaussian_fit.py` →
-   the splat cloud)
-3. Writes the new `voxgaussian/runs/<scene>/gaussians.json`
-4. Exits cleanly with the LiveServer still up so you can inspect
-
-Two equivalent kill switches are wired to the same `stop_requested` flag:
-the viewer button (over WebSocket) and Ctrl-C (SIGINT). Both finish the
-current iteration before bailing — no half-baked state.
-
-To push the improved cloud to the public demo:
-```powershell
-cp voxgaussian\runs\<scene>\gaussians.json voxgaussian\viewer\public\scene\<scene>.gaussians.json
-git add voxgaussian/viewer/public/scene/ ; git commit -m "rebake: <scene> after N iters" ; git push
+python -m pipeline.refine --scene hamlet-square    # default: max-iterations=1
+# bootstrap (~3 min) → iter 1 inpaint (~1 min) → Phase B → exits
+cp runs\hamlet-square\gaussians.json viewer\public\scene\hamlet-square.gaussians.json
+git add voxgaussian/viewer/public/scene/ ; git commit -m "rebake hamlet" ; git push
 npx wrangler pages deploy voxgaussian/viewer/public --project-name=downtoearth --branch=main
 ```
+
+That's the production path — single iter, deterministic, ships.
 
 ### The full pipeline (local generation)
 

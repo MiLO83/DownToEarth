@@ -309,15 +309,16 @@ def main():
     ap.add_argument("--scene", default="hamlet-square",
                     help="Scene id under DownToEarth/")
     ap.add_argument("--max-iterations", type=int, default=1,
-                    help="0 = run until tolerance hit, Ctrl-C, or viewer STOP. "
-                         "Empirically iter 1 is the quality sweet spot with "
-                         "the heavier vote weights — bootstrap + one corroborating "
-                         "inpaint. iter 2+ thickens walls into mush as cross-view "
-                         "depth disagreements pile in.")
-    ap.add_argument("--continuous", action="store_true",
-                    help="Shorthand for --max-iterations 0. Run perspective "
-                         "iterations forever and self-improve until the STOP "
-                         "REFINE button is clicked in the viewer (or Ctrl-C).")
+                    help="Locked at 1 by default — bootstrap + one corroborating "
+                         "inpaint is the quality plateau for this pipeline on "
+                         "consumer hardware (Juggernaut XL backbone). Iter 2+ "
+                         "DEGRADES the result: even with the Lyra-2-style "
+                         "canonical-coord anchor + fill-holes vote-gating + "
+                         "50/50 view selection we added, cross-view depth "
+                         "disagreements compound past iter 1 and you get "
+                         "junk. Raise this only if you've swapped to a "
+                         "stronger backbone (e.g. Flux, or a GEN3C-Cosmos-7B "
+                         "inpaint adapter) and want to test.")
     ap.add_argument("--tolerance", type=float, default=0.02)
     ap.add_argument("--min-iterations", type=int, default=1)
     ap.add_argument("--resolution", type=int, default=128,
@@ -350,7 +351,7 @@ def main():
     if not mesh_path.exists():
         sys.exit(f"mesh missing: {mesh_path}  (run scene_to_3d.py first)")
 
-    max_iters = 0 if args.continuous else args.max_iterations
+    max_iters = args.max_iterations
     run_refinement(
         scene_id=args.scene,
         scene_image=scene_image,
