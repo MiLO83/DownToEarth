@@ -1,3 +1,10 @@
-# Cloudflare Pages — send the root path directly to the standalone UVW demo.
-# (Cloudflare auto-strips .html, so target the canonical extensionless URL.)
-/  /uvw_demo  302
+# Cloudflare Pages routing.
+#
+# Root → photoreal scene demo (Juggernaut XL → 167k Gaussians). The flagship.
+# /uvw  → procedural UVW bijection demo (explains the data structure).
+# /atlas → same.
+#
+# Cloudflare auto-strips .html, so all targets use canonical extensionless URLs.
+/        /scene_demo  302
+/uvw     /uvw_demo    302
+/atlas   /uvw_demo    302

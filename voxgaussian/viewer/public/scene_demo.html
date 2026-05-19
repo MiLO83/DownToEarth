@@ -1,0 +1,348 @@
+<!doctype html>
+<!--
+  scene_demo.html — Photogrammetric Gaussian-splat demo on a real scene.
+
+  Loads /scene/hamlet-square.gaussians.json (167,192 photoreal-colored
+  Gaussians, produced by:
+    Juggernaut XL v9 → 1024² PNG
+    → Hunyuan3D-2 → mesh.glb
+    → voxgaussian/pipeline/refine.py → 128³ voxel grid
+    → voxgaussian/pipeline/texture_pass.py → per-voxel RGB
+    → voxgaussian/pipeline/gaussian_fit.py → 167k Gaussian splats
+  )
+
+  Two view modes:
+    PHOTOREAL  — splat color = sampled-from-Juggernaut-render RGB.
+                 This is the actual photogrammetric output of the pipeline.
+    UVW        — splat color = its voxel coordinate as RGB.
+                 The same data, re-lit by the bijection scheme so you can
+                 see that every splat lives at a unique (u, v, w) slot.
+
+  License: MIT. Original work by MiLO + Opie (2026-05-19).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>voxgaussian — photoreal scene demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<style>
+  :root {
+    --bg: #0a0a12;
+    --panel: rgba(8,10,18,0.82);
+    --panel-border: rgba(255,255,255,0.15);
+    --text: #f5f5f7;
+    --text-dim: rgba(245,245,247,0.55);
+    --accent: #ffb070;
+  }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); overflow: hidden;
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--text); }
+  canvas { display: block; }
+  #title {
+    position: fixed; top: 12px; left: 12px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 6px 14px; border-radius: 999px; font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    pointer-events: none; color: var(--text-dim);
+  }
+  #title b { color: var(--text); }
+  #mode-toggle {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 4px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 4px; border-radius: 999px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .btn {
+    pointer-events: auto;
+    background: rgba(20,24,36,0.0); border: none;
+    color: var(--text); padding: 6px 14px; border-radius: 999px;
+    font-size: 12px; cursor: pointer; letter-spacing: 0.05em;
+  }
+  .btn:hover { background: rgba(255,255,255,0.08); }
+  .btn.active { background: var(--accent); color: #1a1a22; }
+  #hud {
+    position: fixed; top: 12px; right: 12px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 8px; padding: 12px 14px; font-size: 12px; line-height: 1.55;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    pointer-events: none; max-width: 280px;
+  }
+  #hud .k { color: var(--accent); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+  #hud .row { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; }
+  #hud .v { font-variant-numeric: tabular-nums; }
+  #hud .group { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); }
+  #hud .group:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+  #ref {
+    position: fixed; bottom: 14px; left: 14px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 8px; border-radius: 8px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  #ref .lbl { font-size: 10px; color: var(--text-dim);
+    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+  #ref img { width: 280px; height: auto; display: block; border-radius: 4px; }
+  #footer {
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; color: var(--text-dim);
+    letter-spacing: 0.05em; pointer-events: none;
+  }
+  #loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100; flex-direction: column; gap: 12px;
+    transition: opacity 0.4s ease;
+  }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #loading .spinner {
+    width: 32px; height: 32px; border: 3px solid rgba(255,255,255,0.1);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  #loading .progress { font-size: 12px; color: var(--text-dim); letter-spacing: 0.04em; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="loading">
+  <div class="spinner"></div>
+  <div class="progress" id="loading-text">loading hamlet-square gaussians…</div>
+</div>
+<div id="title">photoreal scene · <b>hamlet-square</b> · juggernaut xl → hunyuan3d → voxel refine → 167k gaussians</div>
+<div id="mode-toggle">
+  <button class="btn active" data-mode="photoreal">PHOTOREAL</button>
+  <button class="btn" data-mode="uvw">UVW</button>
+</div>
+<div id="hud">
+  <div class="group">
+    <div class="k">scene</div>
+    <div class="row"><span>gaussians</span><span class="v" id="hud-count">—</span></div>
+    <div class="row"><span>file</span><span class="v">16.8 MB</span></div>
+    <div class="row"><span>source render</span><span class="v">1024² · 1.6 MB</span></div>
+    <div class="row"><span>voxel grid</span><span class="v">128³ · ±4 m</span></div>
+  </div>
+  <div class="group">
+    <div class="k">pipeline</div>
+    <div class="row"><span>scene gen</span><span class="v">Juggernaut XL v9</span></div>
+    <div class="row"><span>mesh</span><span class="v">Hunyuan3D-2</span></div>
+    <div class="row"><span>refine iters</span><span class="v">6</span></div>
+    <div class="row"><span>splat fit</span><span class="v">feed-forward</span></div>
+  </div>
+  <div class="group">
+    <div class="k">view</div>
+    <div class="row"><span>mode</span><span class="v" id="hud-mode">photoreal</span></div>
+    <div class="row"><span>render fps</span><span class="v" id="hud-fps">—</span></div>
+  </div>
+</div>
+<div id="ref">
+  <div class="lbl">input · Juggernaut XL render</div>
+  <img src="scene/hamlet-square.scene.png" alt="source render" />
+</div>
+<div id="footer">drag to orbit · scroll to zoom · right-drag to pan · arrow keys to nudge</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const VOXEL_RES = 128;
+const EXTENT    = 4.0;   // half-width of voxel grid in metres
+const SCALE_BOOST = 1.8; // splat radius multiplier (matches app.js gaussMat)
+
+// ─── Fetch the gaussian cloud ───────────────────────────────────────────
+const loadingText = document.getElementById('loading-text');
+loadingText.textContent = 'fetching gaussians.json…';
+
+const payload = await fetch('scene/hamlet-square.gaussians.json').then(r => r.json());
+const gaussians = payload.gaussians;
+const centroid = payload.centroid || [0, 1, 0];
+const count = gaussians.length;
+document.getElementById('hud-count').textContent = count.toLocaleString();
+loadingText.textContent = `${count.toLocaleString()} gaussians — building scene…`;
+
+// ─── Three.js setup ─────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  powerPreference: 'high-performance',
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;     // photoreal needs gamma
+renderer.toneMapping = THREE.NoToneMapping;            // splat colors are already display-ready
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a12);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 200);
+camera.position.set(centroid[0] + 5, centroid[1] + 4, centroid[2] + 5);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(centroid[0], centroid[1], centroid[2]);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.listenToKeyEvents(window);
+controls.keyPanSpeed = 8;
+controls.update();
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ─── Build the InstancedMesh of Gaussian splats ─────────────────────────
+const planeGeom = new THREE.PlaneGeometry(1, 1);
+const dummy = new THREE.Object3D();
+const colors  = new Float32Array(count * 3);
+const alphas  = new Float32Array(count);
+const scales  = new Float32Array(count);
+const normals = new Float32Array(count * 3);
+
+// We construct the InstancedMesh with a placeholder material; the actual
+// rendering material is swapped in by the mode toggle.
+const placeholderMat = new THREE.MeshBasicMaterial();
+const splats = new THREE.InstancedMesh(planeGeom, placeholderMat, count);
+splats.frustumCulled = false;
+
+for (let i = 0; i < count; i++) {
+  const g = gaussians[i];
+  dummy.position.set(g.p[0], g.p[1], g.p[2]);
+  dummy.updateMatrix();
+  splats.setMatrixAt(i, dummy.matrix);
+
+  colors[i * 3 + 0] = g.c[0];
+  colors[i * 3 + 1] = g.c[1];
+  colors[i * 3 + 2] = g.c[2];
+  alphas[i]  = g.a;
+  scales[i]  = g.s * SCALE_BOOST;
+  if (g.n) {
+    normals[i * 3 + 0] = g.n[0];
+    normals[i * 3 + 1] = g.n[1];
+    normals[i * 3 + 2] = g.n[2];
+  }
+}
+splats.instanceMatrix.needsUpdate = true;
+splats.geometry.setAttribute('instanceColor',  new THREE.InstancedBufferAttribute(colors,  3));
+splats.geometry.setAttribute('instanceAlpha',  new THREE.InstancedBufferAttribute(alphas,  1));
+splats.geometry.setAttribute('instanceScale',  new THREE.InstancedBufferAttribute(scales,  1));
+splats.geometry.setAttribute('instanceNormal', new THREE.InstancedBufferAttribute(normals, 3));
+scene.add(splats);
+
+// ─── Shaders ────────────────────────────────────────────────────────────
+// Photoreal: splat colored by its sampled RGB. Same pattern as app.js gaussMat.
+// UVW:       splat colored by its voxel coord — world_pos → snap to 128³ → RGB.
+// Both share the billboarding vertex code; only the color path differs.
+//
+// Note: instanceMatrix is auto-prepended by Three.js for ShaderMaterial +
+// InstancedMesh, do NOT redeclare it (would be a duplicate-attribute error).
+
+const VERT_COMMON = `
+  attribute vec3 instanceColor;
+  attribute float instanceAlpha;
+  attribute float instanceScale;
+  attribute vec3 instanceNormal;
+  uniform vec3 uCentroid;
+  uniform int uMode;             // 0 = photoreal, 1 = uvw
+  uniform float uExtent;
+  uniform float uVoxelRes;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying vec2 vUV;
+  void main() {
+    vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+
+    if (uMode == 0) {
+      vColor = instanceColor;
+    } else {
+      // World pos → voxel coord → canonical RGB
+      vec3 voxel = floor((instancePos + uExtent) / (2.0 * uExtent) * uVoxelRes);
+      voxel = clamp(voxel, 0.0, uVoxelRes - 1.0);
+      vColor = voxel / (uVoxelRes - 1.0);
+    }
+    vAlpha = instanceAlpha;
+    vUV = uv;
+
+    // Billboard: orient the plane facing camera, scaled by instanceScale.
+    vec3 cameraRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+    vec3 cameraUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+    vec3 offset = (cameraRight * position.x + cameraUp * position.y) * instanceScale;
+    gl_Position = projectionMatrix * viewMatrix * vec4(instancePos + offset, 1.0);
+  }
+`;
+
+const FRAG_COMMON = `
+  precision highp float;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying vec2 vUV;
+  void main() {
+    vec2 d = vUV - 0.5;
+    float r2 = dot(d, d) * 4.0;
+    float falloff = exp(-r2 * 4.0);
+    float a = vAlpha * falloff;
+    if (a < 0.02) discard;
+    gl_FragColor = vec4(vColor, a);
+  }
+`;
+
+const splatMat = new THREE.ShaderMaterial({
+  vertexShader: VERT_COMMON,
+  fragmentShader: FRAG_COMMON,
+  uniforms: {
+    uCentroid: { value: new THREE.Vector3(centroid[0], centroid[1], centroid[2]) },
+    uMode:     { value: 0 },
+    uExtent:   { value: EXTENT },
+    uVoxelRes: { value: VOXEL_RES },
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+});
+splats.material = splatMat;
+
+// ─── Mode toggle ────────────────────────────────────────────────────────
+const hudMode = document.getElementById('hud-mode');
+document.querySelectorAll('#mode-toggle .btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#mode-toggle .btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    const mode = b.dataset.mode;
+    splatMat.uniforms.uMode.value = (mode === 'uvw') ? 1 : 0;
+    hudMode.textContent = mode;
+  });
+});
+
+// ─── Render loop + FPS counter ──────────────────────────────────────────
+let frames = 0;
+let lastFpsT = performance.now();
+const hudFps = document.getElementById('hud-fps');
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+  frames++;
+  const now = performance.now();
+  if (now - lastFpsT >= 500) {
+    const fps = frames / ((now - lastFpsT) / 1000);
+    hudFps.textContent = fps.toFixed(0);
+    frames = 0;
+    lastFpsT = now;
+  }
+});
+
+// ─── Hide loading splash ────────────────────────────────────────────────
+document.getElementById('loading').classList.add('done');
+console.log(`[scene_demo] rendered ${count.toLocaleString()} photoreal gaussians`);
+console.log(`[scene_demo] centroid = (${centroid.map(v => v.toFixed(3)).join(', ')})`);
+console.log(`[scene_demo] pipeline: Juggernaut XL → Hunyuan3D-2 → voxgaussian refine → feed-forward splat fit`);
+</script>
+</body>
+</html>

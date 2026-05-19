@@ -1,11 +1,14 @@
 # Down To Earth
 
-> 🎮 **Live UVW atlas demo:** https://downtoearth-9lq.pages.dev
->
-> Drag to orbit, hover anywhere to see your screen pixel's color literally
-> *being* a voxel coordinate. Side-by-side: class-colored vs canonical-RGB
-> renderings of the same scene. The hover read-out shows both as identical
-> numbers, on purpose.
+> 🎮 **Live demos:**
+> - 🖼️ **Photoreal scene** (flagship): https://downtoearth-9lq.pages.dev
+>   *(167,192 colored Gaussians, baked from a single Juggernaut XL render
+>    through Hunyuan3D → voxel refinement → feed-forward splat fit.
+>    Toggle PHOTOREAL ↔ UVW to see the same data through the bijection.)*
+> - 📐 **UVW bijection explainer**: https://downtoearth-9lq.pages.dev/uvw
+>   *(Procedural hamlet scene, side-by-side panes showing the
+>    summary-atlas-class-palette rendering next to the canonical-RGB
+>    rendering. Both panes are the same data, just different shaders.)*
 
 A JRPG-style WebXR walker plus the **bidirectional voxel ↔ RGB atlas** data
 structure we built for it. The walker is the playground; the atlas is the
