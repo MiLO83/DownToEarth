@@ -1,5 +1,5 @@
 {
-  "_comment_": "SDXL inpaint conditioned on a depth ControlNet driven by the voxel-rendered depth + a soft inpaint mask telling the sampler which pixels to regenerate. IP-Adapter dropped for v1 (model files not present); ControlNet-depth + low-ish denoise carry enough of the geometry constraint to keep iterations consistent. The Python client patches LoadImage nodes by title and outputs one inpainted RGB image. Python then runs Depth-Anything + OneFormer locally to derive new depth + semantic from the RGB.",
+  "_comment_": "SDXL inpaint with Lyra-2-style two-ControlNet anchoring: (1) the standard depth ControlNet conditions on the voxel-rendered depth map, (2) a SECOND ControlNet conditions on the canonical-coord image (each pixel's RGB literally IS its voxel's (u,v,w); black pixels are disocclusion holes). With both anchors, the diffusion model is told 'existing geometry is locked here, only fill where canonical is black' — iterations now ACCRETE detail in the holes instead of re-voting existing structure into mush. The Python client patches LoadImage nodes by title ('reference', 'depth', 'mask', 'semantic', 'canonical'). If your installation lacks the tile ControlNet, swap node 31's `control_net_name` for any structure-preserving SDXL ControlNet you have, or set node 61's `strength` to 0 to disable the canonical anchor and fall back to depth-only.",
 
   "1":  { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors" }, "_meta": { "title": "Load Checkpoint" } },
 
@@ -7,13 +7,16 @@
   "11": { "class_type": "LoadImage", "inputs": { "image": "depth.png" },     "_meta": { "title": "Load Depth Render" } },
   "12": { "class_type": "LoadImage", "inputs": { "image": "mask.png" },      "_meta": { "title": "Load Inpaint Mask" } },
   "13": { "class_type": "LoadImage", "inputs": { "image": "semantic.png" },  "_meta": { "title": "Load Semantic Render" } },
+  "14": { "class_type": "LoadImage", "inputs": { "image": "canonical.png" }, "_meta": { "title": "Load Canonical Render" } },
 
-  "20": { "class_type": "ImageScale", "inputs": { "image": ["10", 0], "upscale_method": "lanczos", "width": 1024, "height": 1024, "crop": "center" },     "_meta": { "title": "Scale Reference to 1024" } },
-  "21": { "class_type": "ImageScale", "inputs": { "image": ["11", 0], "upscale_method": "lanczos", "width": 1024, "height": 1024, "crop": "disabled" },   "_meta": { "title": "Scale Depth to 1024" } },
+  "20": { "class_type": "ImageScale", "inputs": { "image": ["10", 0], "upscale_method": "lanczos",       "width": 1024, "height": 1024, "crop": "center" },     "_meta": { "title": "Scale Reference to 1024" } },
+  "21": { "class_type": "ImageScale", "inputs": { "image": ["11", 0], "upscale_method": "lanczos",       "width": 1024, "height": 1024, "crop": "disabled" },   "_meta": { "title": "Scale Depth to 1024" } },
   "22": { "class_type": "ImageScale", "inputs": { "image": ["12", 0], "upscale_method": "nearest-exact", "width": 1024, "height": 1024, "crop": "disabled" }, "_meta": { "title": "Scale Mask to 1024" } },
   "23": { "class_type": "ImageToMask", "inputs": { "image": ["22", 0], "channel": "red" }, "_meta": { "title": "Mask From Image" } },
+  "24": { "class_type": "ImageScale", "inputs": { "image": ["14", 0], "upscale_method": "nearest-exact", "width": 1024, "height": 1024, "crop": "disabled" }, "_meta": { "title": "Scale Canonical to 1024 (nearest = preserve byte-coord identity)" } },
 
   "30": { "class_type": "ControlNetLoader", "inputs": { "control_net_name": "controlnet-depth-sdxl.safetensors" }, "_meta": { "title": "Load Depth ControlNet" } },
+  "31": { "class_type": "ControlNetLoader", "inputs": { "control_net_name": "controlnet-tile-sdxl.safetensors" },  "_meta": { "title": "Load Canonical ControlNet (tile — swap if you have a better struct-preserver)" } },
 
   "50": { "class_type": "CLIPTextEncode", "inputs": { "text": "cinematic photograph, photorealistic JRPG scene continuation, consistent lighting, 35mm film aesthetic, sharp focus, no people, atmospheric haze", "clip": ["1", 1] }, "_meta": { "title": "Positive Prompt" } },
   "51": { "class_type": "CLIPTextEncode", "inputs": { "text": "painterly, cartoon, anime, illustration, blurry, low quality, watermark, text, people, character, multiple frames",                                          "clip": ["1", 1] }, "_meta": { "title": "Negative Prompt" } },
@@ -32,6 +35,20 @@
     "_meta": { "title": "Apply Depth ControlNet" }
   },
 
+  "61": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["60", 0],
+      "negative": ["60", 1],
+      "control_net": ["31", 0],
+      "image": ["24", 0],
+      "strength": 0.75,
+      "start_percent": 0.0,
+      "end_percent": 0.9
+    },
+    "_meta": { "title": "Apply Canonical ControlNet (Lyra-2-style geometry anchor)" }
+  },
+
   "70": { "class_type": "VAEEncode", "inputs": { "pixels": ["20", 0], "vae": ["1", 2] }, "_meta": { "title": "Encode Reference to Latent" } },
   "71": { "class_type": "SetLatentNoiseMask", "inputs": { "samples": ["70", 0], "mask": ["23", 0] }, "_meta": { "title": "Apply Inpaint Mask" } },
 
@@ -45,8 +62,8 @@
       "scheduler": "karras",
       "denoise": 0.85,
       "model": ["1", 0],
-      "positive": ["60", 0],
-      "negative": ["60", 1],
+      "positive": ["61", 0],
+      "negative": ["61", 1],
       "latent_image": ["71", 0]
     },
     "_meta": { "title": "KSampler (Inpaint)" }

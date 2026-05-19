@@ -158,6 +158,15 @@ class InpaintClient:
         """White = inpaint here, black = keep."""
         Image.fromarray((unknown_mask * 255).astype(np.uint8)).save(out_path)
 
+    def encode_canonical_as_png(self, canonical: np.ndarray, out_path: pathlib.Path) -> None:
+        """Canonical-coord conditioning image — each pixel's RGB is its
+        voxel's (u, v, w). Where the render saw no voxel, RGB is (0, 0, 0).
+        Fed to a ControlNet so the diffusion model treats non-black pixels
+        as geometry-locked and only fills the genuine holes. Lyra-2-style."""
+        if canonical.dtype != np.uint8:
+            canonical = canonical.astype(np.uint8)
+        Image.fromarray(canonical, mode="RGB").save(out_path)
+
     # ─── ComfyUI plumbing ────────────────────────────────────────────────
 
     def upload(self, path: pathlib.Path) -> str:
@@ -242,12 +251,20 @@ class InpaintClient:
     # ─── High-level entry point ──────────────────────────────────────────
 
     def inpaint(self, depth: np.ndarray, semantic: np.ndarray, unknown_mask: np.ndarray,
-                input_image_path: pathlib.Path, iteration: int) -> dict:
+                input_image_path: pathlib.Path, iteration: int,
+                canonical: np.ndarray | None = None) -> dict:
         """Run a full inpaint pass.
 
         ComfyUI workflow returns ONE inpainted RGB image. Python then runs
         Depth-Anything + a semantic segmenter on that RGB to produce the new
         depth + semantic maps, which get propagated back into voxel votes.
+
+        `canonical` (optional, H×W×3 uint8): Lyra-2-style geometry-anchor
+        image. RGB at each pixel is its voxel's (u, v, w); (0, 0, 0) marks
+        an unobserved hole. When provided AND the workflow has a LoadImage
+        node titled "canonical", a ControlNet locks the diffusion to leave
+        non-black pixels intact and only synthesise the holes. Optional so
+        older workflows without that node still work.
 
         Returns dict with `depth` (H×W float meters) and `semantic` (H×W int8)
         for the FULL frame (known regions preserved, unknowns filled).
@@ -271,6 +288,14 @@ class InpaintClient:
         mask_remote = self.upload(mask_png)
         ref_remote = self.upload(input_image_path)
 
+        # Canonical-coord channel (optional). Only uploaded if both the
+        # caller provides it and the workflow includes a "canonical" node.
+        canonical_remote: str | None = None
+        if canonical is not None:
+            canon_png = scratch / f"canonical_in_{iteration}.png"
+            self.encode_canonical_as_png(canonical, canon_png)
+            canonical_remote = self.upload(canon_png)
+
         # Patch the workflow: titled LoadImage nodes get the remote filenames,
         # seed gets the iteration so each pass is deterministic-but-different.
         template = json.loads(self.workflow_path.read_text())
@@ -281,6 +306,8 @@ class InpaintClient:
             if cls == "LoadImage":
                 if "reference" in title or "ref " in title:
                     n["inputs"]["image"] = ref_remote
+                elif "canonical" in title and canonical_remote is not None:
+                    n["inputs"]["image"] = canonical_remote
                 elif "depth" in title:
                     n["inputs"]["image"] = depth_remote
                 elif "mask" in title:

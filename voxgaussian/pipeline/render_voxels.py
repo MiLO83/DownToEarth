@@ -2,10 +2,16 @@
 render_voxels.py — Rasterize occupied voxels to a camera-plane image.
 
 Given a VoxelStore and a camera (position, look-at, fov), produce:
-  - depth_map: H×W float32, distance from camera to nearest occupied voxel
-                (or NaN where no voxel is hit)
+  - depth_map:    H×W float32, distance from camera to nearest occupied voxel
+                  (or NaN where no voxel is hit)
   - semantic_map: H×W int8, class_id of the front-most voxel per pixel
   - confidence_map: H×W float32, mode confidence of the front-most voxel
+  - canonical:    H×W×3 uint8, RGB = (u, v, w) voxel coord of the front-most
+                  voxel per pixel; (0, 0, 0) where unknown. This is the
+                  Lyra-2-style "geometry-locked" conditioning signal — fed to
+                  a ControlNet alongside depth so the diffusion model treats
+                  non-black pixels as anchored existing geometry and only
+                  fills the genuine occlusion holes (black pixels).
   - unknown_mask: H×W bool, True where NO voxel was hit (regions inpaint must fill)
 
 Implementation: project each occupied voxel center to screen space, depth-buffer
@@ -69,6 +75,10 @@ def render(store: VoxelStore, camera: Camera, splat_radius_px: int = 1) -> dict:
     depth = np.full((H, W), np.nan, dtype=np.float32)
     semantic = np.zeros((H, W), dtype=np.int8)
     confidence = np.zeros((H, W), dtype=np.float32)
+    # Canonical-coord image: each pixel's RGB = (u, v, w) of the front-most
+    # voxel that hit it. Pixels with no voxel stay (0, 0, 0). For res ≤ 256
+    # this is byte-perfect identity — the bytes literally ARE the coord.
+    canonical = np.zeros((H, W, 3), dtype=np.uint8)
 
     # Collect occupied voxels as a batch
     indices = []
@@ -113,6 +123,8 @@ def render(store: VoxelStore, camera: Camera, splat_radius_px: int = 1) -> dict:
 
     classes_arr = np.array(classes, dtype=np.int8)[valid]
     confs_arr = np.array(confs, dtype=np.float32)[valid]
+    # Per-voxel (u, v, w) for the canonical-coord channel.
+    uvw_arr = idx_arr[valid].astype(np.uint8)   # (N', 3), values in [0, res-1]
 
     # Splat each voxel as a small disk, keeping nearest-z per pixel
     R = splat_radius_px
@@ -122,6 +134,7 @@ def render(store: VoxelStore, camera: Camera, splat_radius_px: int = 1) -> dict:
     z_valid = z_valid[order]
     classes_arr = classes_arr[order]
     confs_arr = confs_arr[order]
+    uvw_arr = uvw_arr[order]
 
     for dy in range(-R, R + 1):
         for dx in range(-R, R + 1):
@@ -133,18 +146,21 @@ def render(store: VoxelStore, camera: Camera, splat_radius_px: int = 1) -> dict:
             zz = z_valid[ok]
             cc = classes_arr[ok]
             ff = confs_arr[ok]
+            uu = uvw_arr[ok]
             # nearest-z wins
             cur = depth[qy2, qx2]
             replace = np.isnan(cur) | (zz < cur)
             depth[qy2[replace], qx2[replace]] = zz[replace]
             semantic[qy2[replace], qx2[replace]] = cc[replace]
             confidence[qy2[replace], qx2[replace]] = ff[replace]
+            canonical[qy2[replace], qx2[replace]] = uu[replace]
 
     unknown_mask = np.isnan(depth)
     return {
         "depth": depth,            # (H,W) float32, NaN = unknown
         "semantic": semantic,      # (H,W) int8 class id
         "confidence": confidence,  # (H,W) float32 in [0,1]
+        "canonical": canonical,    # (H,W,3) uint8, RGB=(u,v,w); (0,0,0)=unknown
         "unknown_mask": unknown_mask,  # (H,W) bool — True where inpaint should fill
         "camera": camera,
     }
@@ -156,6 +172,7 @@ def _empty_result(camera: Camera) -> dict:
         "depth": np.full((H, W), np.nan, dtype=np.float32),
         "semantic": np.zeros((H, W), dtype=np.int8),
         "confidence": np.zeros((H, W), dtype=np.float32),
+        "canonical": np.zeros((H, W, 3), dtype=np.uint8),
         "unknown_mask": np.ones((H, W), dtype=bool),
         "camera": camera,
     }
@@ -188,3 +205,8 @@ def write_debug_pngs(result: dict, out_prefix: str) -> None:
     Image.fromarray(rgb).save(f"{out_prefix}_semantic.png")
 
     Image.fromarray((unk * 255).astype(np.uint8)).save(f"{out_prefix}_unknown.png")
+
+    # Canonical: each pixel's RGB literally is its voxel coord. Saved raw —
+    # this is what the ControlNet anchor reads.
+    if "canonical" in result:
+        Image.fromarray(result["canonical"], mode="RGB").save(f"{out_prefix}_canonical.png")

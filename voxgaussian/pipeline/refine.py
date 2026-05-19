@@ -181,6 +181,7 @@ def run_refinement(
                 depth=rendered["depth"],
                 semantic=rendered["semantic"],
                 unknown_mask=rendered["unknown_mask"],
+                canonical=rendered.get("canonical"),    # Lyra-2 geometry anchor
                 input_image_path=scene_image,
                 iteration=it,
             )
