@@ -1,16 +1,23 @@
 """
-select_view.py — Active-view selection by uncertainty-mass-in-frustum.
+select_view.py — Active-view selection: 50/50 found ↔ unfound balance.
 
-We don't iterate around a fixed orbit. Each pass picks the camera angle that
-maximizes information gain — specifically, the SUM of voxel uncertainty within
-that camera's frustum, weighted by 1/depth so near-the-camera voxels count
-more (since the inpaint will have more visible pixels to reason about them).
+Pure uncertainty-maximization picks views where most of the frame is holes,
+which gives the inpaint model no context to anchor against. Pure
+known-maximization is pointless (no new info to gain). Sweet spot is a
+view that has BOTH plenty of found voxels (strong inpaint context) AND
+plenty of unfound pixels (real disocclusion holes to fill).
+
+Scoring: cheap 32×32 render per candidate, then score = sqrt(found * unfound).
+The geometric mean peaks when found ≈ unfound, naturally favouring views
+that show "half scene, half hole" rather than "all scene" or "all sky."
 
 Candidates: a small grid of poses surrounding the scene at varying
-elevations + 6 cardinal axis-aligned views. ~30 candidates is plenty.
+elevations + 2 axis-aligned map shots. ~30 candidates is plenty; rendering
+each at 32×32 is ~30 ms, total view-selection cost <2 s per iteration even
+at 100k+ voxels — negligible next to the inpaint pass.
 
 After a view is selected, we record it in the `used_views` set so subsequent
-picks favor unseen angles even if their uncertainty score is similar.
+picks favor unseen angles even if their balance score is similar.
 """
 from __future__ import annotations
 import math
@@ -41,61 +48,67 @@ def candidate_views(extent: float, num_orbital: int = 16, elevations_deg: list[f
     return cams
 
 
-def score_view(camera: Camera, store: VoxelStore, downsample_voxels: int = 4) -> float:
-    """Score a candidate view by summed uncertainty of voxels visible in its
-    frustum, weighted by 1/depth.
+def score_view(
+    camera: Camera,
+    store: VoxelStore,
+    probe_res: int = 32,
+) -> tuple[float, int, int]:
+    """50/50 found-vs-unfound score for a candidate camera.
 
-    We don't fully rasterize for scoring (too slow per candidate). Instead we
-    iterate occupied voxels at a downsampled stride, project each, and check
-    if it's inside the screen + far/near. Cheap and correct enough.
+    Renders the candidate at a low probe resolution and counts:
+      found    = pixels where a voxel was hit (existing geometry context)
+      unfound  = pixels where the ray missed (disocclusion holes / inpaint canvas)
+
+    Returns (score, found, unfound) where score = sqrt(found * unfound).
+    The geometric mean peaks when found ≈ unfound, which is the 50/50 sweet
+    spot: enough context for the inpaint to anchor, enough holes to learn from.
+
+    Pure max-found or pure max-unfound views score 0 — same as a candidate
+    that sees nothing at all. The pipeline naturally avoids "all sky" and
+    "fully populated frame" candidates.
     """
-    view, proj = camera.matrices()
-    cs = store.cell_size
-    ox, oy, oz = store.parent_origin
-
-    total = 0.0
-    for n, (idx, _cls, _conf) in enumerate(store.occupied()):
-        if downsample_voxels > 1 and (n % downsample_voxels) != 0:
-            continue
-        x = ox - store.extent + (idx[0] + 0.5) * cs
-        y = oy - store.extent + (idx[1] + 0.5) * cs
-        z = oz - store.extent + (idx[2] + 0.5) * cs
-        # Transform to view space
-        wp = np.array([x, y, z, 1.0])
-        vp = view @ wp
-        z_cam = -vp[2]
-        if z_cam <= camera.near or z_cam >= camera.far:
-            continue
-        cp = proj @ vp
-        if abs(cp[3]) < 1e-6:
-            continue
-        ndc_x = cp[0] / cp[3]
-        ndc_y = cp[1] / cp[3]
-        if not (-1.05 < ndc_x < 1.05 and -1.05 < ndc_y < 1.05):
-            continue
-        # Sum uncertainty * (1/depth) — near voxels matter more
-        total += store.uncertainty(idx) / max(0.1, z_cam)
-
-    # Also count unknown-frustum mass: bigger fov / closer view = more pixels
-    # to inpaint into. We approximate this by adding a base score that's
-    # higher for views whose camera is closer to the scene's bulk.
-    return total
+    # Cheap probe render — same projection as the main render, just at
+    # probe_res×probe_res so it costs ~30 ms even at 100k+ voxels.
+    probe_cam = Camera(
+        position=camera.position,
+        look_at=camera.look_at,
+        up=camera.up,
+        fov_deg=camera.fov_deg,
+        width=probe_res,
+        height=probe_res,
+        near=camera.near,
+        far=camera.far,
+    )
+    result = render(store, probe_cam, splat_radius_px=1)
+    unknown_mask = result["unknown_mask"]
+    n_pixels = probe_res * probe_res
+    n_unfound = int(unknown_mask.sum())
+    n_found = n_pixels - n_unfound
+    score = math.sqrt(max(0, n_found) * max(0, n_unfound))
+    return score, n_found, n_unfound
 
 
 def pick_next_view(store: VoxelStore, candidates: list[Camera],
                    used_views: set[int], penalty_for_used: float = 0.3) -> tuple[int, Camera]:
-    """Score every candidate, return (index, camera) of the best one.
-
-    `used_views` is the set of candidate indices already used in previous
-    iterations. Re-using a view is allowed but penalized so we explore.
+    """Score every candidate by the 50/50 found-vs-unfound balance and pick
+    the highest. Already-used views get penalised so we keep exploring.
     """
     best_idx = 0
     best_score = -1.0
+    best_found = 0
+    best_unfound = 0
     for i, cam in enumerate(candidates):
-        s = score_view(cam, store)
+        s, f, u = score_view(cam, store)
         if i in used_views:
             s *= penalty_for_used
         if s > best_score:
             best_score = s
             best_idx = i
+            best_found = f
+            best_unfound = u
+    total = max(1, best_found + best_unfound)
+    pct_found = 100.0 * best_found / total
+    print(f"  view-select: cam #{best_idx}  "
+          f"score={best_score:.0f}  found={best_found}  unfound={best_unfound}  "
+          f"({pct_found:.0f}% found / {100.0 - pct_found:.0f}% unfound)")
     return best_idx, candidates[best_idx]
