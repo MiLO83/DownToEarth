@@ -1,0 +1,11 @@
+{
+  "name": "down-to-earth-viewer",
+  "version": "0.1.0",
+  "description": "WebXR walker for DownToEarth — JRPG scenes as 3D meshes, walkable, with stereo VR + passthrough AR modes",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {}
+}

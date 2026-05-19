@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>voxgaussian — live</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a12; overflow: hidden; font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: #f5f5f7; }
+  #app { position: fixed; inset: 0; }
+  #hud {
+    position: fixed; top: 14px; left: 14px;
+    background: rgba(8,10,18,0.78);
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    max-width: 380px;
+    pointer-events: none;
+  }
+  #hud .k { color: #ffb070; letter-spacing: 0.04em; text-transform: uppercase; font-size: 11px; }
+  #hud .v { font-variant-numeric: tabular-nums; }
+  #hud .bar { display: flex; align-items: center; gap: 2px; margin-top: 4px; height: 8px; }
+  #hud .bar > .seg { height: 8px; }
+  #hud canvas { display: block; margin-top: 6px; background: rgba(0,0,0,0.4); border-radius: 4px; }
+  #hud .row-label { font-size: 10px; color: rgba(245,245,247,0.55); margin-top: 4px; }
+  #status {
+    position: fixed; bottom: 14px; left: 14px;
+    font-size: 12px; color: rgba(245,245,247,0.5);
+  }
+  #status.connected { color: #5cb85c; }
+  #status.error     { color: #e85a5a; }
+  #vr-btn-wrap {
+    position: fixed; bottom: 14px; right: 14px;
+    display: flex; gap: 8px;
+  }
+  .btn {
+    pointer-events: auto;
+    background: rgba(20,24,36,0.85);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #f5f5f7;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  .btn:hover { background: rgba(40,46,60,0.95); }
+  .btn.active { background: #ffb070; color: #1a1a22; border-color: #ffb070; }
+  #legend {
+    position: fixed; top: 14px; right: 14px;
+    background: rgba(8,10,18,0.78);
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 8px 12px; border-radius: 8px;
+    font-size: 11px; line-height: 1.6;
+    pointer-events: none;
+  }
+  #legend .row { display: flex; align-items: center; gap: 6px; }
+  #legend .swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.4); }
+  #mode-toggle {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 4px;
+    background: rgba(8,10,18,0.78);
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 4px;
+    border-radius: 999px;
+    pointer-events: auto;
+  }
+  #mode-toggle .btn { padding: 6px 14px; font-size: 12px; border: none; border-radius: 999px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  <div><span class="k">scene</span> <span id="hud-scene" class="v">—</span></div>
+  <div><span class="k">iter</span> <span id="hud-iter" class="v">0</span></div>
+  <div><span class="k">voxels</span> <span id="hud-voxels" class="v">0</span> active, <span id="hud-converged" class="v">0%</span> converged</div>
+  <div><span class="k">mean conf</span> <span id="hud-meanconf" class="v">—</span></div>
+  <div><span class="k">res</span> <span id="hud-res" class="v">—</span></div>
+  <div class="row-label">class distribution</div>
+  <div class="bar" id="class-bar"></div>
+  <div class="row-label">confidence histogram (0% → 100%)</div>
+  <canvas id="confidence-chart" width="320" height="56"></canvas>
+  <div class="row-label">change-rate trend (recent iters)</div>
+  <canvas id="trend-chart" width="320" height="56"></canvas>
+</div>
+<div id="legend"></div>
+<div id="status">disconnected</div>
+<!-- UVW mode HUD: hover-decode results, hidden in other modes -->
+<div id="uvw-hud" style="display:none; position: fixed; top: 14px; right: 14px;
+     background: rgba(8,10,18,0.82); border: 1px solid rgba(255,255,255,0.15);
+     border-radius: 8px; padding: 12px 14px; font-size: 12px; line-height: 1.55;
+     backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+     pointer-events: none; max-width: 280px; z-index: 5;">
+  <div style="color:#ffb070; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; margin-bottom:4px;">uvw decode (hover)</div>
+  <div style="display:flex; justify-content:space-between;"><span>canonical rgb</span><span class="v" id="uvw-rgb">—</span></div>
+  <div style="display:flex; justify-content:space-between;"><span>voxel (u, v, w)</span><span class="v" id="uvw-voxel">—</span></div>
+  <div style="display:flex; justify-content:space-between;"><span>atlas pixel</span><span class="v" id="uvw-atlas">—</span></div>
+  <div style="margin-top:8px; padding-top:8px; border-top: 1px solid rgba(255,255,255,0.08);">
+    <div style="display:flex; justify-content:space-between;">
+      <span><span id="uvw-swatch" style="display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,0.4);margin-right:4px;vertical-align:middle;"></span>class</span>
+      <span class="v" id="uvw-class">—</span>
+    </div>
+    <div style="display:flex; justify-content:space-between;"><span>confidence</span><span class="v" id="uvw-conf">—</span></div>
+    <div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;margin:2px 0;">
+      <div id="uvw-conf-bar" style="height:100%;background:#ffb070;width:0%;"></div>
+    </div>
+    <div style="display:flex; justify-content:space-between;"><span>obs (log)</span><span class="v" id="uvw-obs">—</span></div>
+    <div style="display:flex; justify-content:space-between;"><span>margin</span><span class="v" id="uvw-margin">—</span></div>
+  </div>
+  <div style="margin-top:8px; padding-top:8px; border-top: 1px solid rgba(255,255,255,0.08); font-size:10px; color: rgba(245,245,247,0.55);">
+    atlas: <span id="uvw-atlas-dims">—</span> · res: <span id="uvw-res">—</span>
+  </div>
+</div>
+<div id="mode-toggle">
+  <button class="btn active" data-mode="cubes">OCCUPANCY</button>
+  <button class="btn" data-mode="uvw">UVW</button>
+  <button class="btn" data-mode="gaussian">GAUSSIAN</button>
+</div>
+<div id="vr-btn-wrap"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,90 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "scene.png"
+    },
+    "_meta": {
+      "title": "Load Scene Image"
+    }
+  },
+  "10": {
+    "class_type": "Hy3DModelLoader",
+    "inputs": {
+      "model": "hunyuan3d-dit-v2-0.safetensors",
+      "attention_mode": "sdpa"
+    },
+    "_meta": {
+      "title": "Load Hy3D Model"
+    }
+  },
+  "20": {
+    "class_type": "Hy3DGenerateMesh",
+    "inputs": {
+      "pipeline": [
+        "10",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ],
+      "guidance_scale": 5.5,
+      "steps": 30,
+      "seed": 42
+    },
+    "_meta": {
+      "title": "Generate Mesh"
+    }
+  },
+  "30": {
+    "class_type": "Hy3DVAEDecode",
+    "inputs": {
+      "vae": [
+        "10",
+        1
+      ],
+      "latents": [
+        "20",
+        0
+      ],
+      "box_v": 1.01,
+      "octree_resolution": 384,
+      "num_chunks": 8000
+    },
+    "_meta": {
+      "title": "VAE Decode \u00e2\u2020\u2019 Mesh"
+    }
+  },
+  "40": {
+    "class_type": "Hy3DPostprocessMesh",
+    "inputs": {
+      "trimesh": [
+        "30",
+        0
+      ],
+      "remove_floaters": true,
+      "remove_degenerate_faces": true,
+      "reduce_faces": true,
+      "max_facenum": 40000,
+      "smooth_normals": false
+    },
+    "_meta": {
+      "title": "Postprocess Mesh"
+    }
+  },
+  "50": {
+    "class_type": "Hy3DExportMesh",
+    "inputs": {
+      "trimesh": [
+        "40",
+        0
+      ],
+      "filename_prefix": "downtoearth/hamlet-square_hunyuan3d",
+      "file_format": "glb"
+    },
+    "_meta": {
+      "title": "Export GLB"
+    }
+  }
+}

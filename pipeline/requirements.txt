@@ -1,0 +1,16 @@
+# Local content-generation pipeline dependencies
+#
+# ComfyUI itself is NOT installed via pip — run it separately from
+# https://github.com/comfyanonymous/ComfyUI and ensure the relevant custom
+# nodes are installed (see README).
+#
+# These are for the orchestration scripts in this folder.
+
+websocket-client>=1.7.0
+pillow>=10.0.0
+numpy>=1.24.0
+
+# ML stack for extract_walkable.py — Depth-Anything V2 inference
+torch>=2.1.0
+transformers>=4.40.0
+opencv-python>=4.8.0

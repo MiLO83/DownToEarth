@@ -1,0 +1,639 @@
+<!doctype html>
+<!--
+  uvw_demo.html — Interactive demonstration of the bidirectional
+                  voxel ↔ RGB atlas with zero-cost identity.
+
+  WHAT THIS PROVES
+  ================
+  A single voxel scene is rendered TWICE simultaneously:
+
+    LEFT pane  — colored by SEMANTIC CLASS via the summary atlas.
+                 Per-fragment: vUvw → tile-mapped atlas UV → texture sample
+                 → R byte = class id → palette lookup → display color.
+
+    RIGHT pane — colored by CANONICAL UVW (each fragment outputs its own
+                 voxel coordinate directly as RGB). No texture lookup,
+                 just `gl_FragColor = vec4(vUvw / 256.0, 1.0)`.
+
+  HOVER over either pane: we read the RIGHT pane's framebuffer at the
+  cursor (one gl.readPixels), interpret the RGB literally as a voxel
+  coord, run it through the same JS bijection used to build the atlas,
+  and read back the summary entry. No raycast, no inverse-projection,
+  no sparse-tree traversal — pure arithmetic.
+
+  This is the entire data-structure thesis made visible.
+
+  LICENSE
+  =======
+  MIT. Original work by MiLO + Opie (2026-05-19).
+  Implements long-standing primitives (G-buffer position pass,
+  space-filling-curve volume packing, derived-data cache atlas).
+  No NVIDIA Lyra code, no GPL deps. Ship freely.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>voxgaussian — uvw atlas demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<style>
+  :root {
+    --bg: #0a0a12;
+    --panel: rgba(8,10,18,0.82);
+    --panel-border: rgba(255,255,255,0.15);
+    --text: #f5f5f7;
+    --text-dim: rgba(245,245,247,0.55);
+    --accent: #ffb070;
+  }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); overflow: hidden;
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--text); }
+  #stage { position: fixed; inset: 0; display: flex; }
+  .pane { flex: 1; position: relative; border-right: 1px solid rgba(255,255,255,0.08); }
+  .pane:last-child { border-right: none; }
+  .pane-label { position: absolute; top: 12px; left: 12px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 6px 12px; border-radius: 999px; font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    pointer-events: none; }
+  .pane-label.accent { color: var(--accent); border-color: var(--accent); }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hud {
+    position: fixed; top: 12px; right: 12px; max-width: 320px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 8px; padding: 12px 14px; font-size: 12px; line-height: 1.55;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    pointer-events: none;
+  }
+  #hud .k { color: var(--accent); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+  #hud .v { font-variant-numeric: tabular-nums; }
+  #hud .row { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; }
+  #hud .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    border: 1px solid rgba(0,0,0,0.4); margin-right: 4px; vertical-align: middle; }
+  #hud .bar { height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; margin: 2px 0; }
+  #hud .bar > .fill { height: 100%; background: var(--accent); }
+  #hud .group { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); }
+  #hud .group:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+  #title {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 6px 14px; border-radius: 999px; font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    pointer-events: none; color: var(--text-dim);
+  }
+  #title b { color: var(--text); }
+  #footer {
+    position: fixed; bottom: 10px; left: 0; right: 0;
+    text-align: center; font-size: 10px; color: var(--text-dim);
+    letter-spacing: 0.05em; pointer-events: none;
+  }
+  #atlas-inset {
+    position: fixed; bottom: 14px; left: 14px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 8px; border-radius: 8px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  #atlas-inset .lbl { font-size: 10px; color: var(--text-dim);
+    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+  #atlas-inset canvas { width: 256px; height: 256px; image-rendering: pixelated;
+    background: #000; border-radius: 4px; display: block; }
+  #atlas-inset .crosshair {
+    position: absolute; width: 12px; height: 12px;
+    border: 2px solid var(--accent); border-radius: 50%;
+    pointer-events: none; transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="pane" id="pane-summary"><div class="pane-label">SUMMARY ATLAS  ·  R→class palette</div></div>
+  <div class="pane" id="pane-canonical"><div class="pane-label accent">CANONICAL  ·  uvw / 256 → RGB</div></div>
+</div>
+<div id="title">voxel ↔ rgb bijection  ·  <b>identity inherited, zero VRAM</b></div>
+<div id="hud">
+  <div class="group">
+    <div class="k">cursor</div>
+    <div class="row"><span>screen</span><span class="v" id="hud-screen">—</span></div>
+    <div class="row"><span>canonical rgb</span><span class="v" id="hud-rgb">—</span></div>
+    <div class="row"><span>voxel (u, v, w)</span><span class="v" id="hud-voxel">—</span></div>
+    <div class="row"><span>atlas pixel</span><span class="v" id="hud-atlas">—</span></div>
+  </div>
+  <div class="group">
+    <div class="k">summary sample</div>
+    <div class="row"><span><span class="swatch" id="hud-swatch"></span>class</span><span class="v" id="hud-class">—</span></div>
+    <div class="row"><span>confidence</span><span class="v" id="hud-conf">—</span></div>
+    <div class="bar"><div class="fill" id="hud-conf-bar" style="width:0%"></div></div>
+    <div class="row"><span>observations (log)</span><span class="v" id="hud-obs">—</span></div>
+    <div class="bar"><div class="fill" id="hud-obs-bar" style="width:0%"></div></div>
+    <div class="row"><span>ambiguity margin</span><span class="v" id="hud-margin">—</span></div>
+    <div class="bar"><div class="fill" id="hud-margin-bar" style="width:0%"></div></div>
+  </div>
+  <div class="group">
+    <div class="k">scene</div>
+    <div class="row"><span>voxels active</span><span class="v" id="hud-voxels">—</span></div>
+    <div class="row"><span>atlas usage</span><span class="v" id="hud-usage">—</span></div>
+  </div>
+</div>
+<div id="atlas-inset" style="position: fixed;">
+  <div class="lbl">summary atlas · 4096²</div>
+  <canvas id="atlas-canvas" width="256" height="256"></canvas>
+  <div class="crosshair" id="atlas-crosshair" style="display: none;"></div>
+</div>
+<div id="footer">drag to orbit · scroll to zoom · hover anywhere to decode the voxel under the cursor</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── Constants matching pipeline/uvw_atlas.py ───────────────────────────
+const VOXEL_RES    = 256;
+const ATLAS_SIZE   = 4096;
+const TILE_SIZE    = 256;
+const TILES_PER_ROW = 16;
+
+// Class taxonomy from pipeline/voxel_store.py
+const CLASSES = ["empty","sky","ground","path","water","wall","building","vegetation","prop","character","fx"];
+const CLASS_COLORS_HEX = ["#000000","#7ec8ff","#5cb85c","#bfa67a","#3a7da8","#9a9a9a","#a06848","#2d8a3a","#c87a48","#e8c4a0","#ffae40"];
+const CLASS_COLORS = CLASS_COLORS_HEX.map(h => {
+  const n = parseInt(h.slice(1), 16);
+  return [((n >> 16) & 0xff) / 255, ((n >> 8) & 0xff) / 255, (n & 0xff) / 255];
+});
+
+// ─── The bijection — matches Python voxel_to_atlas() byte-for-byte ──────
+function voxelToAtlas(u, v, w) {
+  return [((w & 15) << 8) | u, ((w >> 4) << 8) | v];
+}
+function atlasToVoxel(x, y) {
+  return [x & 255, y & 255, (y >> 8) * TILES_PER_ROW + (x >> 8)];
+}
+
+// ─── Procedural "hamlet square" voxel scene ─────────────────────────────
+// Builds a sparse list of (u, v, w, class_id, top_count, runner_count, total)
+// then bakes the summary atlas exactly as the Python pipeline would.
+function buildSceneAndAtlas() {
+  // Sparse occupancy: Map<key, {class, top, runner, total}>
+  const occ = new Map();
+  const key = (u, v, w) => (u | (v << 8) | (w << 16)) >>> 0;
+  const set = (u, v, w, cls, top = 32, runner = 2, total = 36) => {
+    if (u < 0 || u >= 256 || v < 0 || v >= 256 || w < 0 || w >= 256) return;
+    occ.set(key(u, v, w), { u, v, w, cls, top, runner, total });
+  };
+
+  // Centre the scene on (128, 64, 128). Vertical axis is V (y in world).
+  const cx = 128, cz = 128, gy = 32;
+
+  // Ground slab: 1 voxel thick over a 128×128 footprint.
+  for (let dx = -64; dx < 64; dx++) {
+    for (let dz = -64; dz < 64; dz++) {
+      // class 2 = ground, with noise in confidence for visual texture
+      const conf_noise = Math.floor(28 + 8 * Math.sin(dx * 0.7 + dz * 0.5));
+      set(cx + dx, gy, cz + dz, 2, conf_noise, 3, conf_noise + 6);
+    }
+  }
+
+  // Diagonal path: ~12 wide, runs SW to NE.
+  for (let t = -70; t < 70; t++) {
+    for (let off = -6; off < 6; off++) {
+      const dx = t + off * 0.4 | 0;
+      const dz = t - off * 0.4 | 0;
+      set(cx + dx, gy, cz + dz, 3, 30, 4, 36);
+    }
+  }
+
+  // Buildings — hollow rectangular shells (walls + roofs).
+  const buildings = [
+    { ox: -40, oz: -32, sx: 18, sz: 14, h: 16 },
+    { ox:  20, oz: -38, sx: 14, sz: 18, h: 20 },
+    { ox: -28, oz:  28, sx: 22, sz: 16, h: 14 },
+    { ox:  30, oz:  22, sx: 16, sz: 22, h: 22 },
+  ];
+  for (const b of buildings) {
+    for (let dx = 0; dx < b.sx; dx++) {
+      for (let dz = 0; dz < b.sz; dz++) {
+        for (let dy = 1; dy <= b.h; dy++) {
+          // wall iff on perimeter, roof iff dy == h
+          const onEdge = dx === 0 || dx === b.sx - 1 || dz === 0 || dz === b.sz - 1;
+          const isRoof = dy === b.h;
+          if (!onEdge && !isRoof) continue;
+          // class 6 = building (walls), class 5 = wall (top/roof) for some variety
+          const cls = isRoof ? 5 : 6;
+          set(cx + b.ox + dx, gy + dy, cz + b.oz + dz, cls, 30, 5, 38);
+        }
+      }
+    }
+  }
+
+  // Trees — vertical column trunk + 3-voxel-radius "leaf cluster" up top.
+  const trees = [
+    [ -52, -8 ], [ -10, -54 ], [  44,  -8 ], [  10,  44 ],
+    [ -56,  56 ], [  60,  52 ], [   0,  -2 ], [ -22,  -6 ],
+  ];
+  for (const [tx, tz] of trees) {
+    const treeH = 8 + ((tx + tz) & 3);
+    for (let dy = 1; dy <= treeH; dy++) {
+      // class 7 = vegetation; the trunk is darker by way of lower confidence
+      set(cx + tx, gy + dy, cz + tz, 7, 24, 6, 36);
+    }
+    // leaves: 3-voxel-radius sphere at the top
+    const ly = gy + treeH;
+    for (let ddx = -3; ddx <= 3; ddx++) {
+      for (let ddy = -2; ddy <= 3; ddy++) {
+        for (let ddz = -3; ddz <= 3; ddz++) {
+          const r2 = ddx * ddx + ddy * ddy + ddz * ddz;
+          if (r2 > 9 || r2 < 2) continue;
+          set(cx + tx + ddx, ly + ddy, cz + tz + ddz, 7, 26, 8, 40);
+        }
+      }
+    }
+  }
+
+  // A well (prop) near centre.
+  for (let dy = 1; dy <= 3; dy++) {
+    for (let a = 0; a < 8; a++) {
+      const ang = a * Math.PI / 4;
+      set(cx + Math.round(2 * Math.cos(ang)), gy + dy, cz + Math.round(2 * Math.sin(ang)), 8, 22, 4, 30);
+    }
+  }
+
+  // Sky band — just a sparse scatter of class 1 high up, for variety in B (obs) byte.
+  for (let i = 0; i < 60; i++) {
+    set(cx + ((Math.random() * 120 | 0) - 60),
+        gy + 40 + (Math.random() * 8 | 0),
+        cz + ((Math.random() * 120 | 0) - 60),
+        1, 12, 3, 20);
+  }
+
+  // ── Bake the summary atlas exactly as build_summary_atlas() does. ─────
+  const atlasBytes = new Uint8Array(ATLAS_SIZE * ATLAS_SIZE * 4);
+  let nz = 0;
+  for (const { u, v, w, cls, top, runner, total } of occ.values()) {
+    const [ax, ay] = voxelToAtlas(u, v, w);
+    const idx = (ay * ATLAS_SIZE + ax) * 4;
+    atlasBytes[idx + 0] = cls & 0xff;
+    atlasBytes[idx + 1] = Math.min(255, Math.round(top / total * 255));
+    atlasBytes[idx + 2] = Math.min(255, Math.round(Math.log2(total + 1) * 16));
+    atlasBytes[idx + 3] = Math.min(255, Math.round((top - runner) / total * 255));
+    nz++;
+  }
+  return { occ, atlasBytes, voxelCount: nz };
+}
+
+const { occ, atlasBytes, voxelCount } = buildSceneAndAtlas();
+
+// ─── Three.js setup — single renderer, two viewports ────────────────────
+const stage = document.getElementById('stage');
+const paneSummary = document.getElementById('pane-summary');
+const paneCanonical = document.getElementById('pane-canonical');
+const canvas = document.createElement('canvas');
+canvas.style.position = 'fixed';
+canvas.style.inset = '0';
+canvas.style.zIndex = '0';
+canvas.style.pointerEvents = 'auto';
+stage.parentElement.insertBefore(canvas, stage);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+
+const scene = new THREE.Scene();
+scene.background = null;
+
+const cameraL = new THREE.PerspectiveCamera(45, (innerWidth / 2) / innerHeight, 0.1, 1000);
+cameraL.position.set(60, 50, 60);
+cameraL.lookAt(0, 8, 0);
+const cameraR = cameraL.clone();
+
+// Linked orbit: control left camera, copy to right.
+const controls = new OrbitControls(cameraL, canvas);
+controls.target.set(0, 8, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+// ─── Geometry: one InstancedMesh sharing voxel coords across both shaders ──
+const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
+const instCount = occ.size;
+const uvwAttr = new Float32Array(instCount * 3);
+const matrix = new THREE.Matrix4();
+const dummyMesh = new THREE.Object3D();
+let i = 0;
+for (const { u, v, w } of occ.values()) {
+  // Center scene around origin: subtract 128.
+  dummyMesh.position.set(u - 128, v - 32, w - 128);
+  dummyMesh.updateMatrix();
+  uvwAttr[i * 3 + 0] = u;
+  uvwAttr[i * 3 + 1] = v;
+  uvwAttr[i * 3 + 2] = w;
+  i++;
+}
+
+// Build the matrices and the per-instance uvw attribute on one InstancedMesh.
+// We'll use a no-op material because we render via custom ShaderMaterials below
+// driven through onBeforeRender.
+const placeholderMat = new THREE.MeshBasicMaterial();
+const mesh = new THREE.InstancedMesh(cubeGeom, placeholderMat, instCount);
+mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+i = 0;
+for (const { u, v, w } of occ.values()) {
+  dummyMesh.position.set(u - 128, v - 32, w - 128);
+  dummyMesh.updateMatrix();
+  mesh.setMatrixAt(i++, dummyMesh.matrix);
+}
+mesh.instanceMatrix.needsUpdate = true;
+mesh.geometry.setAttribute('instanceUvw', new THREE.InstancedBufferAttribute(uvwAttr, 3));
+scene.add(mesh);
+
+// ─── Summary atlas → GPU texture ────────────────────────────────────────
+const atlasTex = new THREE.DataTexture(atlasBytes, ATLAS_SIZE, ATLAS_SIZE, THREE.RGBAFormat, THREE.UnsignedByteType);
+atlasTex.minFilter = THREE.NearestFilter;
+atlasTex.magFilter = THREE.NearestFilter;
+atlasTex.wrapS = THREE.ClampToEdgeWrapping;
+atlasTex.wrapT = THREE.ClampToEdgeWrapping;
+atlasTex.generateMipmaps = false;
+atlasTex.needsUpdate = true;
+
+// ─── Shaders ────────────────────────────────────────────────────────────
+// The bijection in GLSL — same arithmetic as voxelToAtlas() in JS.
+const BIJECTION_GLSL = `
+vec2 voxelToAtlasUV(vec3 uvw) {
+    float u = floor(uvw.x + 0.5);
+    float v = floor(uvw.y + 0.5);
+    float w = floor(uvw.z + 0.5);
+    float tileCol = mod(w, 16.0);
+    float tileRow = floor(w / 16.0);
+    float ax = tileCol * 256.0 + u;
+    float ay = tileRow * 256.0 + v;
+    return (vec2(ax, ay) + 0.5) / 4096.0;
+}`;
+
+const VERT = `
+// instanceMatrix must be declared explicitly when using ShaderMaterial + InstancedMesh.
+// (Three.js auto-injects it only for the built-in materials.)
+attribute mat4 instanceMatrix;
+attribute vec3 instanceUvw;
+varying vec3 vUvw;
+void main() {
+    vUvw = instanceUvw;
+    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+}`;
+
+const FRAG_SUMMARY = `
+precision highp float;
+varying vec3 vUvw;
+uniform sampler2D summaryAtlas;
+uniform vec3 palette[11];
+${BIJECTION_GLSL}
+void main() {
+    vec4 s = texture2D(summaryAtlas, voxelToAtlasUV(vUvw));
+    int cls = int(floor(s.r * 255.0 + 0.5));
+    vec3 c = palette[0];
+    // GLSL ES 1.0 can't index by non-const, but on Three.js WebGL2 we get dynamic indexing.
+    // Either way we resolve with a small chain — n_classes is fixed at 11.
+    if (cls ==  1) c = palette[ 1];
+    else if (cls ==  2) c = palette[ 2];
+    else if (cls ==  3) c = palette[ 3];
+    else if (cls ==  4) c = palette[ 4];
+    else if (cls ==  5) c = palette[ 5];
+    else if (cls ==  6) c = palette[ 6];
+    else if (cls ==  7) c = palette[ 7];
+    else if (cls ==  8) c = palette[ 8];
+    else if (cls ==  9) c = palette[ 9];
+    else if (cls == 10) c = palette[10];
+    float conf = s.g;
+    float bright = 0.55 + 0.45 * conf;
+    gl_FragColor = vec4(c * bright, 1.0);
+}`;
+
+const FRAG_CANONICAL = `
+precision highp float;
+varying vec3 vUvw;
+void main() {
+    gl_FragColor = vec4(vUvw / 256.0, 1.0);
+}`;
+
+const matSummary = new THREE.ShaderMaterial({
+  vertexShader: VERT,
+  fragmentShader: FRAG_SUMMARY,
+  uniforms: {
+    summaryAtlas: { value: atlasTex },
+    palette: { value: CLASS_COLORS.map(c => new THREE.Vector3(c[0], c[1], c[2])) },
+  },
+});
+const matCanonical = new THREE.ShaderMaterial({
+  vertexShader: VERT,
+  fragmentShader: FRAG_CANONICAL,
+});
+
+// ─── Offscreen RT for hover-decode (samples the canonical pass) ─────────
+const decodeRT = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType,
+});
+
+// ─── Atlas inset preview (2D canvas) ────────────────────────────────────
+const atlasCanvas = document.getElementById('atlas-canvas');
+const atlasCtx = atlasCanvas.getContext('2d');
+const atlasImg = atlasCtx.createImageData(256, 256);
+// Downsample 4096² → 256² (16× per axis): take the R byte (class id) and
+// look up the class color. Empty pixels stay black.
+for (let dy = 0; dy < 256; dy++) {
+  for (let dx = 0; dx < 256; dx++) {
+    let r = 0, g = 0, b = 0, hit = 0;
+    for (let oy = 0; oy < 16; oy++) {
+      for (let ox = 0; ox < 16; ox++) {
+        const idx = ((dy * 16 + oy) * ATLAS_SIZE + (dx * 16 + ox)) * 4;
+        if (atlasBytes[idx + 1] > 0) {
+          const c = CLASS_COLORS[atlasBytes[idx] % 11];
+          r += c[0] * 255; g += c[1] * 255; b += c[2] * 255;
+          hit++;
+        }
+      }
+    }
+    const out = (dy * 256 + dx) * 4;
+    if (hit > 0) {
+      atlasImg.data[out + 0] = r / hit;
+      atlasImg.data[out + 1] = g / hit;
+      atlasImg.data[out + 2] = b / hit;
+      atlasImg.data[out + 3] = 255;
+    } else {
+      atlasImg.data[out + 3] = 255;
+    }
+  }
+}
+atlasCtx.putImageData(atlasImg, 0, 0);
+
+// ─── Render loop ────────────────────────────────────────────────────────
+function syncCameras() {
+  cameraR.copy(cameraL);
+  cameraL.aspect = (innerWidth / 2) / innerHeight;
+  cameraR.aspect = (innerWidth / 2) / innerHeight;
+  cameraL.updateProjectionMatrix();
+  cameraR.updateProjectionMatrix();
+}
+
+function render() {
+  controls.update();
+  syncCameras();
+
+  const w = innerWidth, h = innerHeight;
+  const halfW = w / 2 | 0;
+
+  // (1) Render canonical pass to the offscreen RT (full size; we'll sample any pixel).
+  mesh.material = matCanonical;
+  renderer.setRenderTarget(decodeRT);
+  renderer.setViewport(0, 0, w, h);
+  renderer.setScissor(0, 0, w, h);
+  renderer.setScissorTest(false);
+  renderer.clear(true, true, true);
+  // For the offscreen pass, render with the LEFT camera (the controlled one).
+  renderer.render(scene, cameraL);
+
+  // (2) Render to the visible canvas in two viewports.
+  renderer.setRenderTarget(null);
+  renderer.setScissorTest(true);
+
+  // Left: summary atlas pass.
+  mesh.material = matSummary;
+  renderer.setViewport(0, 0, halfW, h);
+  renderer.setScissor(0, 0, halfW, h);
+  renderer.setClearColor(0x0a0a12, 1);
+  renderer.clear(true, true, true);
+  renderer.render(scene, cameraL);
+
+  // Right: canonical pass (visible).
+  mesh.material = matCanonical;
+  renderer.setViewport(halfW, 0, w - halfW, h);
+  renderer.setScissor(halfW, 0, w - halfW, h);
+  renderer.setClearColor(0x0a0a12, 1);
+  renderer.clear(true, true, true);
+  renderer.render(scene, cameraR);
+
+  requestAnimationFrame(render);
+}
+render();
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  decodeRT.setSize(innerWidth, innerHeight);
+});
+
+// ─── Hover decode ───────────────────────────────────────────────────────
+const hud = {
+  screen: document.getElementById('hud-screen'),
+  rgb: document.getElementById('hud-rgb'),
+  voxel: document.getElementById('hud-voxel'),
+  atlas: document.getElementById('hud-atlas'),
+  cls: document.getElementById('hud-class'),
+  swatch: document.getElementById('hud-swatch'),
+  conf: document.getElementById('hud-conf'),
+  confBar: document.getElementById('hud-conf-bar'),
+  obs: document.getElementById('hud-obs'),
+  obsBar: document.getElementById('hud-obs-bar'),
+  margin: document.getElementById('hud-margin'),
+  marginBar: document.getElementById('hud-margin-bar'),
+  voxels: document.getElementById('hud-voxels'),
+  usage: document.getElementById('hud-usage'),
+};
+hud.voxels.textContent = voxelCount.toLocaleString();
+hud.usage.textContent = ((voxelCount / (ATLAS_SIZE * ATLAS_SIZE)) * 100).toFixed(3) + '%';
+
+const atlasCrosshair = document.getElementById('atlas-crosshair');
+const atlasInset = document.getElementById('atlas-inset');
+
+const readBuf = new Uint8Array(4);
+let lastReadFrame = 0;
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * renderer.getPixelRatio() | 0;
+  const sy = (rect.height - (e.clientY - rect.top)) * renderer.getPixelRatio() | 0;
+
+  hud.screen.textContent = `${e.clientX | 0}, ${e.clientY | 0}`;
+
+  // Read one pixel from the canonical RT.
+  // (The canonical RT is rendered full-size with cameraL, so any cursor pos works.)
+  renderer.readRenderTargetPixels(decodeRT, sx, sy, 1, 1, readBuf);
+  const [r, g, b, a] = readBuf;
+
+  if (a < 16) {
+    // Background — no voxel under cursor.
+    hud.rgb.textContent = `(background)`;
+    hud.voxel.textContent = '—';
+    hud.atlas.textContent = '—';
+    hud.cls.textContent = '—';
+    hud.conf.textContent = '—';
+    hud.obs.textContent = '—';
+    hud.margin.textContent = '—';
+    hud.confBar.style.width = '0%';
+    hud.obsBar.style.width = '0%';
+    hud.marginBar.style.width = '0%';
+    hud.swatch.style.background = '#000';
+    atlasCrosshair.style.display = 'none';
+    return;
+  }
+
+  // The canonical bytes ARE the voxel coord. No math required.
+  const u = r, v = g, w = b;
+  const [ax, ay] = voxelToAtlas(u, v, w);
+
+  hud.rgb.textContent = `${r}, ${g}, ${b}`;
+  hud.voxel.textContent = `${u}, ${v}, ${w}`;
+  hud.atlas.textContent = `${ax}, ${ay}`;
+
+  // Now sample the summary atlas at that position.
+  const idx = (ay * ATLAS_SIZE + ax) * 4;
+  const sCls = atlasBytes[idx + 0];
+  const sConf = atlasBytes[idx + 1];
+  const sObs = atlasBytes[idx + 2];
+  const sMargin = atlasBytes[idx + 3];
+
+  hud.cls.textContent = sConf > 0 ? `${sCls} · ${CLASSES[sCls] || '?'}` : '—';
+  hud.swatch.style.background = sConf > 0 ? CLASS_COLORS_HEX[sCls] || '#000' : '#000';
+  hud.conf.textContent = sConf > 0 ? `${(sConf / 255 * 100).toFixed(1)}%` : '—';
+  hud.confBar.style.width = (sConf / 255 * 100) + '%';
+  hud.obs.textContent = sObs > 0 ? `≈ 2^${(sObs / 16).toFixed(1)}` : '—';
+  hud.obsBar.style.width = (sObs / 255 * 100) + '%';
+  hud.margin.textContent = sConf > 0 ? `${(sMargin / 255 * 100).toFixed(1)}%` : '—';
+  hud.marginBar.style.width = (sMargin / 255 * 100) + '%';
+
+  // Position the crosshair on the atlas inset (4096→256 downsample, so divide by 16).
+  const insetRect = atlasInset.getBoundingClientRect();
+  // The canvas sits at (8, headerHeight) inside the inset; we approximate by
+  // anchoring to the canvas's own getBoundingClientRect.
+  const aRect = atlasCanvas.getBoundingClientRect();
+  atlasCrosshair.style.display = 'block';
+  atlasCrosshair.style.left = (aRect.left + ax / 16) + 'px';
+  atlasCrosshair.style.top  = (aRect.top  + ay / 16) + 'px';
+});
+
+canvas.addEventListener('mouseleave', () => {
+  atlasCrosshair.style.display = 'none';
+});
+
+// ─── Console output for self-verification ──────────────────────────────
+console.log(`[uvw_demo] ${voxelCount.toLocaleString()} voxels baked into a ${ATLAS_SIZE}² summary atlas.`);
+console.log(`[uvw_demo] atlas footprint: ${(ATLAS_SIZE * ATLAS_SIZE * 4 / 1024 / 1024).toFixed(1)} MB (single texture upload).`);
+console.log(`[uvw_demo] active fraction: ${(voxelCount / (ATLAS_SIZE * ATLAS_SIZE) * 100).toFixed(4)}%`);
+// Sanity-check the bijection round-trips on a few points.
+for (const [u, v, w] of [[0,0,0],[255,255,255],[128,200,17],[42,42,42]]) {
+  const [x, y] = voxelToAtlas(u, v, w);
+  const [u2, v2, w2] = atlasToVoxel(x, y);
+  console.assert(u === u2 && v === v2 && w === w2, 'bijection broken!', u, v, w, '->', x, y, '->', u2, v2, w2);
+}
+console.log('[uvw_demo] bijection round-trip verified on sample points.');
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# Generated AI assets (re-creatable from prompts, too big for a repo)
+assets-raw/
+voxgaussian/runs/*/views/
+voxgaussian/runs/*/iter_*.png
+voxgaussian/runs/*/*.json
+
+# Mesh / point-cloud output
+*.glb
+*.gltf
+*.ply
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.pytest_cache/
+
+# Node / deploy
+node_modules/
+.wrangler/
+.dev.vars
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local screenshots / scratch
+*.tmp
+Screenshot*.png
+voxgaussian/workflows/_scratch/

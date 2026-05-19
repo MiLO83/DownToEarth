@@ -1,0 +1,146 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "Down To Earth",
+  "version": "0.1.0",
+  "startScene": "hamlet-square",
+  "startSpawn": "well",
+
+  "characters": {
+    "hero": {
+      "displayName": "Wren",
+      "model": "assets/characters/hero.glb",
+      "portrait": "assets/portraits/hero.png",
+      "scaleMeters": 1.75,
+      "appearance": {
+        "ipAdapterRef": "characters/hero/reference.png",
+        "loraName": "wren_v1",
+        "prompt": "young traveler, brown cloak, leather satchel, short auburn hair, weathered boots, JRPG protagonist style"
+      }
+    },
+    "elder-bren": {
+      "displayName": "Elder Bren",
+      "model": "assets/characters/elder-bren.glb",
+      "portrait": "assets/portraits/elder-bren.png",
+      "scaleMeters": 1.7,
+      "appearance": {
+        "ipAdapterRef": "characters/elder-bren/reference.png",
+        "prompt": "elderly village elder, white beard, embroidered linen robe, walking staff, kind weathered face, JRPG NPC"
+      }
+    },
+    "merchant-pip": {
+      "displayName": "Pip the Trader",
+      "model": "assets/characters/merchant-pip.glb",
+      "portrait": "assets/portraits/merchant-pip.png",
+      "scaleMeters": 1.65,
+      "appearance": {
+        "ipAdapterRef": "characters/merchant-pip/reference.png",
+        "prompt": "stocky merchant, leather apron over green tunic, beaded braids, gold-toothed grin, JRPG trader"
+      }
+    }
+  },
+
+  "scenes": {
+    "hamlet-square": {
+      "displayName": "Hamlet Square",
+      "mesh": "assets/scenes/hamlet-square/mesh.glb",
+      "walkable": "assets/scenes/hamlet-square/walkable.json",
+      "cameraFraming": {
+        "position": [0, 3.2, 6.5],
+        "lookAt": [0, 1.0, 0],
+        "fov": 38
+      },
+      "ambientColor": "#f4e4c1",
+      "lights": [
+        { "type": "directional", "direction": [-0.4, -1, -0.6], "color": "#fff5d6", "intensity": 1.2 },
+        { "type": "ambient", "color": "#5a6b8a", "intensity": 0.35 }
+      ],
+      "spawns": {
+        "well": { "position": [0, 0, 0], "facing": 0 },
+        "fromForest": { "position": [-4.2, 0, -1.5], "facing": 90 }
+      },
+      "actors": [
+        { "character": "elder-bren", "position": [1.5, 0, -0.8], "facing": 180 },
+        { "character": "merchant-pip", "position": [-2.1, 0, 0.5], "facing": 45 }
+      ],
+      "exits": [
+        {
+          "trigger": { "type": "polygon", "points": [[-5.5, -2.5], [-5.5, 0], [-4.5, 0], [-4.5, -2.5]] },
+          "destination": { "scene": "forest-edge", "spawn": "fromHamlet" }
+        }
+      ],
+      "generation": {
+        "prompt": "cinematic photograph of a small medieval village square at golden hour, weathered stone well in the center, thatched cottages, cobblestone paths, soft warm lighting, atmospheric haze, shallow depth of field, photorealistic, 35mm film aesthetic, no people, empty square",
+        "negativePrompt": "people, humans, characters, modern, contemporary, painterly, cartoon, anime, illustration, painting, blurry, low quality",
+        "seed": 142857,
+        "checkpoint": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+      }
+    },
+    "forest-edge": {
+      "displayName": "Forest Edge",
+      "mesh": "assets/scenes/forest-edge/mesh.glb",
+      "walkable": "assets/scenes/forest-edge/walkable.json",
+      "cameraFraming": {
+        "position": [0, 2.8, 5.5],
+        "lookAt": [0, 0.8, 0],
+        "fov": 42
+      },
+      "ambientColor": "#a8d4a8",
+      "lights": [
+        { "type": "directional", "direction": [0.3, -1, -0.7], "color": "#d4ffaa", "intensity": 0.9 },
+        { "type": "ambient", "color": "#3a5040", "intensity": 0.4 }
+      ],
+      "spawns": {
+        "fromHamlet": { "position": [4.5, 0, 1.5], "facing": -90 },
+        "fromShrine": { "position": [-3.5, 0, -1.0], "facing": 90 }
+      },
+      "actors": [],
+      "exits": [
+        {
+          "trigger": { "type": "polygon", "points": [[5, -2], [5, 2], [6, 2], [6, -2]] },
+          "destination": { "scene": "hamlet-square", "spawn": "fromForest" }
+        },
+        {
+          "trigger": { "type": "polygon", "points": [[-5, -2], [-5, 2], [-4, 2], [-4, -2]] },
+          "destination": { "scene": "old-shrine", "spawn": "fromForest" }
+        }
+      ],
+      "generation": {
+        "prompt": "cinematic photograph of an ancient forest path at dusk, mossy weathered stones, fireflies, gnarled old trees, dappled volumetric light through canopy, photorealistic, 35mm film aesthetic, atmospheric depth, no people, empty path",
+        "negativePrompt": "people, characters, modern, painterly, cartoon, anime, illustration, painting, blurry, low quality",
+        "seed": 314159,
+        "checkpoint": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+      }
+    },
+    "old-shrine": {
+      "displayName": "Old Shrine",
+      "mesh": "assets/scenes/old-shrine/mesh.glb",
+      "walkable": "assets/scenes/old-shrine/walkable.json",
+      "cameraFraming": {
+        "position": [0, 3.5, 7.0],
+        "lookAt": [0, 1.2, 0],
+        "fov": 36
+      },
+      "ambientColor": "#c8b8e8",
+      "lights": [
+        { "type": "directional", "direction": [0, -1, -0.3], "color": "#e8d4ff", "intensity": 0.8 },
+        { "type": "ambient", "color": "#4a3a6a", "intensity": 0.5 }
+      ],
+      "spawns": {
+        "fromForest": { "position": [3.5, 0, 1.5], "facing": -90 }
+      },
+      "actors": [],
+      "exits": [
+        {
+          "trigger": { "type": "polygon", "points": [[4, -2], [4, 2], [5, 2], [5, -2]] },
+          "destination": { "scene": "forest-edge", "spawn": "fromShrine" }
+        }
+      ],
+      "generation": {
+        "prompt": "cinematic photograph of an ancient stone shrine in a forest clearing, weathered moss-covered altar, faintly glowing carved runes, hanging vines, cold blue moonlight piercing the canopy, atmospheric mist, photorealistic, 35mm film aesthetic, mystical mood, no people",
+        "negativePrompt": "people, characters, modern, painterly, cartoon, anime, illustration, painting, blurry, low quality",
+        "seed": 271828,
+        "checkpoint": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+      }
+    }
+  }
+}

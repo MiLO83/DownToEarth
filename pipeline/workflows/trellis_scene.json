@@ -1,0 +1,38 @@
+{
+  "_comment": "Trellis image-to-3D workflow template. Assumes ComfyUI-Trellis nodes installed (https://github.com/jtydhr88/ComfyUI-Trellis). Replace node specifics to match your installed version.",
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "scene.png" },
+    "_meta": { "title": "Load Scene Image" }
+  },
+  "2": {
+    "class_type": "TrellisLoader",
+    "inputs": {
+      "model_name": "TRELLIS-image-large"
+    },
+    "_meta": { "title": "Load Trellis" }
+  },
+  "3": {
+    "class_type": "TrellisGenerate3D",
+    "inputs": {
+      "model": ["2", 0],
+      "image": ["1", 0],
+      "seed": 42,
+      "sparse_structure_steps": 12,
+      "slat_steps": 12,
+      "guidance_scale": 7.5
+    },
+    "_meta": { "title": "Generate 3D" }
+  },
+  "4": {
+    "class_type": "TrellisSaveMesh",
+    "inputs": {
+      "trellis_output": ["3", 0],
+      "filename_prefix": "downtoearth/scene_trellis",
+      "format": "glb",
+      "simplify_ratio": 0.95,
+      "texture_resolution": 1024
+    },
+    "_meta": { "title": "Save GLB" }
+  }
+}

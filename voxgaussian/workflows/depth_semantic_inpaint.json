@@ -1,0 +1,57 @@
+{
+  "_comment_": "SDXL inpaint conditioned on a depth ControlNet driven by the voxel-rendered depth + a soft inpaint mask telling the sampler which pixels to regenerate. IP-Adapter dropped for v1 (model files not present); ControlNet-depth + low-ish denoise carry enough of the geometry constraint to keep iterations consistent. The Python client patches LoadImage nodes by title and outputs one inpainted RGB image. Python then runs Depth-Anything + OneFormer locally to derive new depth + semantic from the RGB.",
+
+  "1":  { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors" }, "_meta": { "title": "Load Checkpoint" } },
+
+  "10": { "class_type": "LoadImage", "inputs": { "image": "reference.png" }, "_meta": { "title": "Load Reference" } },
+  "11": { "class_type": "LoadImage", "inputs": { "image": "depth.png" },     "_meta": { "title": "Load Depth Render" } },
+  "12": { "class_type": "LoadImage", "inputs": { "image": "mask.png" },      "_meta": { "title": "Load Inpaint Mask" } },
+  "13": { "class_type": "LoadImage", "inputs": { "image": "semantic.png" },  "_meta": { "title": "Load Semantic Render" } },
+
+  "20": { "class_type": "ImageScale", "inputs": { "image": ["10", 0], "upscale_method": "lanczos", "width": 1024, "height": 1024, "crop": "center" },     "_meta": { "title": "Scale Reference to 1024" } },
+  "21": { "class_type": "ImageScale", "inputs": { "image": ["11", 0], "upscale_method": "lanczos", "width": 1024, "height": 1024, "crop": "disabled" },   "_meta": { "title": "Scale Depth to 1024" } },
+  "22": { "class_type": "ImageScale", "inputs": { "image": ["12", 0], "upscale_method": "nearest-exact", "width": 1024, "height": 1024, "crop": "disabled" }, "_meta": { "title": "Scale Mask to 1024" } },
+  "23": { "class_type": "ImageToMask", "inputs": { "image": ["22", 0], "channel": "red" }, "_meta": { "title": "Mask From Image" } },
+
+  "30": { "class_type": "ControlNetLoader", "inputs": { "control_net_name": "controlnet-depth-sdxl.safetensors" }, "_meta": { "title": "Load Depth ControlNet" } },
+
+  "50": { "class_type": "CLIPTextEncode", "inputs": { "text": "cinematic photograph, photorealistic JRPG scene continuation, consistent lighting, 35mm film aesthetic, sharp focus, no people, atmospheric haze", "clip": ["1", 1] }, "_meta": { "title": "Positive Prompt" } },
+  "51": { "class_type": "CLIPTextEncode", "inputs": { "text": "painterly, cartoon, anime, illustration, blurry, low quality, watermark, text, people, character, multiple frames",                                          "clip": ["1", 1] }, "_meta": { "title": "Negative Prompt" } },
+
+  "60": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["50", 0],
+      "negative": ["51", 0],
+      "control_net": ["30", 0],
+      "image": ["21", 0],
+      "strength": 0.9,
+      "start_percent": 0.0,
+      "end_percent": 0.95
+    },
+    "_meta": { "title": "Apply Depth ControlNet" }
+  },
+
+  "70": { "class_type": "VAEEncode", "inputs": { "pixels": ["20", 0], "vae": ["1", 2] }, "_meta": { "title": "Encode Reference to Latent" } },
+  "71": { "class_type": "SetLatentNoiseMask", "inputs": { "samples": ["70", 0], "mask": ["23", 0] }, "_meta": { "title": "Apply Inpaint Mask" } },
+
+  "80": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 142857,
+      "steps": 28,
+      "cfg": 6.5,
+      "sampler_name": "dpmpp_2m_sde_gpu",
+      "scheduler": "karras",
+      "denoise": 0.85,
+      "model": ["1", 0],
+      "positive": ["60", 0],
+      "negative": ["60", 1],
+      "latent_image": ["71", 0]
+    },
+    "_meta": { "title": "KSampler (Inpaint)" }
+  },
+
+  "90": { "class_type": "VAEDecode", "inputs": { "samples": ["80", 0], "vae": ["1", 2] }, "_meta": { "title": "VAE Decode" } },
+  "91": { "class_type": "SaveImage", "inputs": { "filename_prefix": "voxgaussian/iter", "images": ["90", 0] }, "_meta": { "title": "Save Inpainted RGB" } }
+}

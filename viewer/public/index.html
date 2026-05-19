@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Down To Earth</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: #f5f5f7; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    pointer-events: none; padding: 16px;
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+  }
+  #vr-btn, #ar-btn {
+    pointer-events: auto;
+    background: rgba(20,24,36,0.85);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #f5f5f7;
+    padding: 10px 22px;
+    border-radius: 999px;
+    font-size: 15px;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  #vr-btn:hover, #ar-btn:hover { background: rgba(40,46,60,0.9); }
+  #scene-label {
+    position: fixed; top: 20px; left: 20px;
+    background: rgba(8,10,18,0.75);
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 14px; letter-spacing: 0.04em;
+  }
+  #dialog {
+    position: fixed; left: 50%; bottom: 80px; transform: translateX(-50%);
+    width: min(720px, calc(100% - 32px));
+    background: rgba(8,10,18,0.9);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 12px;
+    padding: 14px 18px;
+    pointer-events: auto;
+    display: none;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.8);
+  }
+  #dialog.visible { display: block; }
+  #dialog .speaker { color: #ffb070; font-weight: 600; margin-bottom: 4px; letter-spacing: 0.05em; text-transform: uppercase; font-size: 12px; }
+  #dialog .body { font-size: 14px; line-height: 1.4; }
+  #loading {
+    position: fixed; inset: 0; background: #000;
+    display: flex; align-items: center; justify-content: center;
+    color: #ffb070; font-size: 18px; letter-spacing: 0.1em;
+  }
+  #loading.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="loading">LOADING…</div>
+<div id="scene-label"></div>
+<div id="dialog"><div class="speaker"></div><div class="body"></div></div>
+<div id="hud">
+  <button id="vr-btn">ENTER VR</button>
+  <button id="ar-btn" style="display:none">ENTER PASSTHROUGH</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

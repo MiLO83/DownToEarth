@@ -1,0 +1,3 @@
+# Cloudflare Pages — send the root path to the standalone UVW demo
+# (the integrated viewer at /index.html needs the local pipeline backend).
+/  /uvw_demo.html  302

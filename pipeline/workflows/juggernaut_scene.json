@@ -1,0 +1,49 @@
+{
+  "_comment": "Minimal Juggernaut XL workflow template. Replace node values to match your ComfyUI setup. The pipeline patcher targets nodes by class_type, so structure doesn't need to be identical — but at least one CheckpointLoaderSimple, two CLIPTextEncodes (one with 'negative' in title), one KSampler, and one SaveImage must exist.",
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors" },
+    "_meta": { "title": "Load Checkpoint" }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "placeholder prompt", "clip": ["1", 1] },
+    "_meta": { "title": "Positive Prompt" }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "blurry, low quality", "clip": ["1", 1] },
+    "_meta": { "title": "Negative Prompt" }
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 },
+    "_meta": { "title": "Empty Latent" }
+  },
+  "5": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 142857,
+      "steps": 30,
+      "cfg": 6.5,
+      "sampler_name": "dpmpp_2m_sde_gpu",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["4", 0]
+    },
+    "_meta": { "title": "KSampler" }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["5", 0], "vae": ["1", 2] },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": { "filename_prefix": "downtoearth/scene", "images": ["6", 0] },
+    "_meta": { "title": "Save Image" }
+  }
+}
