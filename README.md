@@ -1,5 +1,14 @@
 # Down To Earth
 
+> 🎮 **Live UVW atlas demo:** https://downtoearth-9lq.pages.dev
+>
+> Interactive proof of the bidirectional voxel ↔ RGB atlas — drag to orbit,
+> hover anywhere to see your screen pixel's color literally *being* a voxel
+> coordinate. Side-by-side: class-colored vs canonical-RGB renderings of
+> the same scene. See [`voxgaussian/README.md`](voxgaussian/README.md) and
+> [`voxgaussian/pipeline/uvw_atlas.py`](voxgaussian/pipeline/uvw_atlas.py)
+> for the design.
+
 A JRPG-style WebXR walker. Backgrounds and characters are AI-generated locally (Juggernaut XL → Hunyuan3D / Trellis), converted to 3D scenes with walkable polygons (Depth-Anything V2 + segmentation), and traversed in-engine by a 3D character on Quest 3 (immersive VR or AR passthrough) or any modern desktop browser.
 
 Inspired by Final Fantasy VII / IX — 3D characters on richly-rendered, fixed-camera-feeling scenes — but the scenes are actual 3D geometry so you can walk freely.
