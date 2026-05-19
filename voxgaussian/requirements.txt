@@ -1,0 +1,20 @@
+# voxgaussian — iterative voxel-occupancy + Gaussian-splat pipeline deps.
+#
+# Install:   pip install -r voxgaussian/requirements.txt
+#
+# ComfyUI itself is NOT installed via pip — run it separately and ensure
+# the ComfyUI-Hunyuan3DWrapper + IPAdapter_plus custom nodes are installed.
+
+# Core
+numpy>=1.24.0
+pillow>=10.0.0
+trimesh>=4.0.0          # mesh loading in bootstrap.py
+
+# Live viewer + ComfyUI client (two different libraries — note the names!)
+websockets>=12.0        # SERVER lib used by pipeline/live_server.py
+websocket-client>=1.7.0 # CLIENT lib used by pipeline/inpaint_client.py
+
+# ML stack for the bootstrap step (Depth-Anything V2 + OneFormer)
+torch>=2.1.0
+transformers>=4.40.0
+opencv-python>=4.8.0
