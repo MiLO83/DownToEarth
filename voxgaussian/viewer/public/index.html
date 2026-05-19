@@ -70,6 +70,34 @@
     pointer-events: auto;
   }
   #mode-toggle .btn { padding: 6px 14px; font-size: 12px; border: none; border-radius: 999px; }
+  /* Continuous-refine controls — hidden by default, shown when a pipeline
+     WebSocket is connected (so pages.dev visitors never see a dead button). */
+  #pipeline-ctrl {
+    position: fixed; top: 62px; left: 50%; transform: translateX(-50%);
+    display: none;
+    pointer-events: auto;
+  }
+  #pipeline-ctrl.connected { display: block; }
+  #stop-refine-btn {
+    background: rgba(200, 70, 70, 0.92);
+    border: 1px solid rgba(255, 120, 120, 0.55);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  #stop-refine-btn:hover { background: rgba(225, 95, 95, 0.96); }
+  #stop-refine-btn:disabled { background: rgba(80, 60, 60, 0.75); cursor: wait; opacity: 0.85; }
+  #pipeline-ctrl .hint {
+    font-size: 10px; color: rgba(245,245,247,0.55);
+    letter-spacing: 0.05em; text-align: center; margin-top: 6px;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -93,6 +121,10 @@
   <button class="btn active" data-mode="cubes">OCCUPANCY</button>
   <button class="btn" data-mode="uvw">UVW</button>
   <button class="btn" data-mode="gaussian">GAUSSIAN</button>
+</div>
+<div id="pipeline-ctrl">
+  <button id="stop-refine-btn">⏸ STOP REFINE</button>
+  <div class="hint">auto-improving — click to finish current iter + bake</div>
 </div>
 <div id="vr-btn-wrap"></div>
 

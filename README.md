@@ -601,6 +601,43 @@ python -m voxgaussian.pipeline.uvw_atlas
 #   Exhaustive bijection check (256³ pairs)... OK
 ```
 
+### Continuous self-improve mode (local)
+
+Run the refinement loop until you decide it's good enough. The pipeline picks
+a fresh camera angle each iteration, renders the current voxel state from
+there, sends unknowns through ControlNet inpaint, votes the corrections back
+into the per-voxel histograms, ray-carves empty space along the ray, and
+broadcasts a snapshot to the live viewer. Then repeats. Forever.
+
+```powershell
+cd voxgaussian
+python -m pipeline.refine --scene hamlet-square --continuous
+# (or: --max-iterations 0 — same effect)
+```
+
+Open http://localhost:5174 in a browser. A red **⏸ STOP REFINE** button
+appears below the OCCUPANCY/UVW/GAUSSIAN mode toggle (only visible when the
+WebSocket is connected — so visitors on the public pages.dev URL never see
+a dead control).
+
+When you're satisfied with the convergence, click STOP. The pipeline:
+1. Finishes its in-flight iteration
+2. Runs Phase B (`texture_pass.py` → per-voxel RGB, then `gaussian_fit.py` →
+   the splat cloud)
+3. Writes the new `voxgaussian/runs/<scene>/gaussians.json`
+4. Exits cleanly with the LiveServer still up so you can inspect
+
+Two equivalent kill switches are wired to the same `stop_requested` flag:
+the viewer button (over WebSocket) and Ctrl-C (SIGINT). Both finish the
+current iteration before bailing — no half-baked state.
+
+To push the improved cloud to the public demo:
+```powershell
+cp voxgaussian\runs\<scene>\gaussians.json voxgaussian\viewer\public\scene\<scene>.gaussians.json
+git add voxgaussian/viewer/public/scene/ ; git commit -m "rebake: <scene> after N iters" ; git push
+npx wrangler pages deploy voxgaussian/viewer/public --project-name=downtoearth --branch=main
+```
+
 ### The full pipeline (local generation)
 
 Prerequisites:

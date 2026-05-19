@@ -453,6 +453,12 @@ function connect() {
   ws.onopen = () => {
     status.textContent = `connected ${WS_URL}`;
     status.className = 'connected';
+    // Reveal the continuous-refine STOP control now that a live pipeline
+    // is on the other end. Reset the button to its idle state too.
+    const pc = document.getElementById('pipeline-ctrl');
+    const sb = document.getElementById('stop-refine-btn');
+    if (pc) pc.classList.add('connected');
+    if (sb) { sb.disabled = false; sb.textContent = '⏸ STOP REFINE'; }
   };
   ws.onmessage = async ev => {
     try {
@@ -477,6 +483,8 @@ function connect() {
   ws.onclose = () => {
     status.textContent = 'disconnected — retrying…';
     status.className = 'error';
+    const pc = document.getElementById('pipeline-ctrl');
+    if (pc) pc.classList.remove('connected');
     scheduleReconnect();
   };
   ws.onerror = () => {};
@@ -487,6 +495,22 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 2000);
 }
 connect();
+
+// ─── STOP REFINE button ─────────────────────────────────────────────────
+// Sends {"type": "stop"} to the running refine.py loop. The pipeline
+// finishes its in-flight iteration, runs Phase B (texture + gaussian fit),
+// and writes the new gaussians.json. Then the loop exits cleanly.
+{
+  const stopBtn = document.getElementById('stop-refine-btn');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'stop' }));
+      stopBtn.disabled = true;
+      stopBtn.textContent = '⏳ stopping after this iter…';
+    });
+  }
+}
 
 // ─── Animation loop ─────────────────────────────────────────────────────
 // Hover-decode was removed: UVW mode is now a pure visual rendering toggle

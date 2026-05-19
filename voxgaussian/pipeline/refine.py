@@ -116,15 +116,30 @@ def run_refinement(
     runs_dir = REPO / "voxgaussian" / "runs" / scene_id
     runs_dir.mkdir(parents=True, exist_ok=True)
 
-    # SIGINT handler — set a flag, the loop checks it and saves before exit.
+    # Graceful stop: shared flag flipped by either Ctrl-C OR the viewer's
+    # STOP REFINE button (delivered via the LiveServer's WebSocket).
+    # The loop checks the flag at the end of every iteration and finishes
+    # the in-flight Phase B (texture + gaussians) before exiting.
     stop_requested = {"flag": False}
+
+    def _request_stop(reason: str) -> None:
+        if not stop_requested["flag"]:
+            print(f"\n[refine] stop requested ({reason}) — "
+                  f"finishing current iteration then saving...")
+        stop_requested["flag"] = True
+
     def _sigint(sig, frame):
         if stop_requested["flag"]:
             print("\n[refine] second Ctrl-C — exiting immediately")
             sys.exit(130)
-        print("\n[refine] Ctrl-C received - finishing current iteration then saving...")
-        stop_requested["flag"] = True
+        _request_stop("Ctrl-C")
     signal.signal(signal.SIGINT, _sigint)
+
+    if server:
+        def _on_ws_msg(data):
+            if isinstance(data, dict) and data.get("type") == "stop":
+                _request_stop("viewer STOP button")
+        server.on_message = _on_ws_msg
 
     # Treat max_iterations=0 as "forever" — use a huge number internally
     effective_max = max_iterations if max_iterations > 0 else 10_000_000
@@ -288,11 +303,15 @@ def main():
     ap.add_argument("--scene", default="hamlet-square",
                     help="Scene id under DownToEarth/")
     ap.add_argument("--max-iterations", type=int, default=1,
-                    help="0 = run until tolerance hit or Ctrl-C. "
+                    help="0 = run until tolerance hit, Ctrl-C, or viewer STOP. "
                          "Empirically iter 1 is the quality sweet spot with "
                          "the heavier vote weights — bootstrap + one corroborating "
                          "inpaint. iter 2+ thickens walls into mush as cross-view "
                          "depth disagreements pile in.")
+    ap.add_argument("--continuous", action="store_true",
+                    help="Shorthand for --max-iterations 0. Run perspective "
+                         "iterations forever and self-improve until the STOP "
+                         "REFINE button is clicked in the viewer (or Ctrl-C).")
     ap.add_argument("--tolerance", type=float, default=0.02)
     ap.add_argument("--min-iterations", type=int, default=1)
     ap.add_argument("--resolution", type=int, default=128,
@@ -320,13 +339,14 @@ def main():
     if not mesh_path.exists():
         sys.exit(f"mesh missing: {mesh_path}  (run scene_to_3d.py first)")
 
+    max_iters = 0 if args.continuous else args.max_iterations
     run_refinement(
         scene_id=args.scene,
         scene_image=scene_image,
         mesh_path=mesh_path,
         extent=args.extent,
         resolution=args.resolution,
-        max_iterations=args.max_iterations,
+        max_iterations=max_iters,
         tolerance=args.tolerance,
         min_iterations=args.min_iterations,
         comfyui_url=args.comfyui,

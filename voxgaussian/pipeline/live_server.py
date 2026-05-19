@@ -43,6 +43,10 @@ class LiveServer:
         self._latest_snapshot: dict | None = None
         self._http_httpd: socketserver.TCPServer | None = None
         self._http_thread: threading.Thread | None = None
+        # Optional callback fired whenever a connected viewer sends a JSON
+        # message back to the server (e.g. {"type": "stop"} from the STOP
+        # REFINE button). refine.py wires this into its stop_requested flag.
+        self.on_message: "callable | None" = None
 
     # ─── Public ──────────────────────────────────────────────────────────
 
@@ -88,8 +92,19 @@ class LiveServer:
             # On connect, send the latest snapshot so the viewer hydrates
             if self._latest_snapshot is not None:
                 await ws.send(json.dumps(self._latest_snapshot, separators=(",", ":")))
-            async for _msg in ws:
-                pass    # viewer is read-only for now
+            async for msg in ws:
+                # Bidirectional: forward parsed JSON to the on_message callback
+                # if one is registered. Used by the viewer's STOP REFINE button.
+                if self.on_message is None:
+                    continue
+                try:
+                    data = json.loads(msg)
+                except (ValueError, TypeError):
+                    continue   # ignore malformed messages
+                try:
+                    self.on_message(data)
+                except Exception as e:
+                    print(f"[live] on_message handler raised: {e!r}")
         except Exception:
             pass
         finally:
