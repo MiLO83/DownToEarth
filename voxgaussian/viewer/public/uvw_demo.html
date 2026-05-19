@@ -287,9 +287,25 @@ canvas.style.zIndex = '0';
 canvas.style.pointerEvents = 'auto';
 stage.parentElement.insertBefore(canvas, stage);
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+// Renderer tuning for current hardware (PC + Quest 3):
+//   antialias:  MSAA smooths cube edges — cheap at 23k instances, free on
+//               anything made after 2018. ~0% perf cost on RTX 30-series+,
+//               <5% on Quest 3 / Adreno 740.
+//   pixelRatio: cap at 2. Higher only helps on 4K+/Retina; Quest 3 already
+//               supersamples internally, so 2 is the right ceiling.
+//   colorSpace: Linear — the canonical pass outputs vec4(vUvw / 255.0); we
+//               want the displayed pixel bytes to MATCH the voxel coords
+//               exactly, not be gamma-corrected. Drop sRGB conversion.
+//   toneMap:    None — same reason as colorSpace. No filmic curve on coords.
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  powerPreference: 'high-performance',
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;
 renderer.autoClear = false;
 
 const scene = new THREE.Scene();
@@ -341,6 +357,11 @@ for (const { u, v, w } of occ.values()) {
 }
 mesh.instanceMatrix.needsUpdate = true;
 mesh.geometry.setAttribute('instanceUvw', new THREE.InstancedBufferAttribute(uvwAttr, 3));
+// Skip the per-frame frustum check — Three.js can't bound InstancedMesh by
+// its instance positions automatically (the BoxGeometry's bounding sphere is
+// at origin), and computing it ourselves would cost more than we'd save by
+// occasionally culling. Just always draw all instances.
+mesh.frustumCulled = false;
 scene.add(mesh);
 
 // ─── Summary atlas → GPU texture ────────────────────────────────────────

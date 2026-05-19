@@ -88,6 +88,11 @@ const voxelMat = new THREE.MeshBasicMaterial({
 const cubesMesh = new THREE.InstancedMesh(voxelGeom, voxelMat, MAX_VOXELS);
 cubesMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_VOXELS * 3), 3);
 cubesMesh.count = 0;
+// Skip per-frame frustum check — Three.js can't bound an InstancedMesh by
+// its instance positions (the base BoxGeometry's bounding sphere is at
+// origin and tiny). Computing the bound ourselves each snapshot would cost
+// more than the cull saves at typical voxel counts. Always draw all.
+cubesMesh.frustumCulled = false;
 scene.add(cubesMesh);
 
 // Per-instance voxel coord (u, v, w) for the UVW canonical pass.

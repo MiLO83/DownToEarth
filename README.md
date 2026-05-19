@@ -463,6 +463,91 @@ fields.
 
 ---
 
+## Scaling — what extra bytes per channel buy you
+
+The whole scheme hinges on a single property: **the RGB values rendered by the canonical pass *are* the voxel coordinates.** Doubling the bits per channel doubles the world size you can name without losing this byte-perfect identity.
+
+### Current tuning (what's deployed)
+
+| Setting | Value | Why |
+|---|---|---|
+| Atlas format | **RGBA8** | One byte per axis = 256³ voxels = 16.7M cells, fits a single 4096² texture (64 MB VRAM). Byte-perfect identity: `readPixel(x,y)[0..3]` *is* `(u, v, w, payload)`. |
+| Antialias | `MSAA on` | Cheap at 23k instances. Smooths cube edges. Since hover-decode is gone, MSAA at edges doesn't compromise anything. |
+| Output color space | `LinearSRGBColorSpace` (demo) | Skips Three.js's linear→sRGB conversion so the canonical-pass bytes display *exactly* as the voxel coords. The main viewer keeps `SRGBColorSpace` because its OCCUPANCY/GAUSSIAN modes benefit from gamma-correct color. |
+| Tone mapping | `NoToneMapping` (demo) | A filmic curve would shift the canonical-pass bytes. No curve = byte-faithful display. |
+| `frustumCulled` | `false` on InstancedMesh | Three.js can't bound an InstancedMesh by its instance positions (only the base geometry). Computing the bound ourselves would cost more than the cull saves at our voxel counts. |
+| Pixel ratio cap | `min(devicePixelRatio, 2)` | Higher only helps 4K+/Retina; Quest 3 already supersamples in compositor. |
+
+Estimated VRAM for the current setup: **~80–100 MB**. Estimated FPS: **vsync-locked** on any GPU made after 2018, **90 Hz solid** on Quest 3 in immersive VR. Both have plenty of headroom for the upgrades below.
+
+### The byte-depth ladder
+
+<table>
+<tr>
+<th width="50%">🧒 In plain English</th>
+<th width="50%">🤓 Technical</th>
+</tr>
+
+<tr>
+<td>
+
+We've got 4 bytes (R, G, B, A) per voxel right now — each in the range 0 to 255. That gives us **256 × 256 × 256 ≈ 17 million voxels**, which sounds like a lot but is actually only a 2.5-meter cube if each voxel is 1 centimeter.
+
+To make a *bigger* world we don't change the scheme — we just give each colour channel more bits. The address is still the colour; the colour is still the address. Just wider numbers.
+
+**16-bit per channel** (RGBA16) doubles each axis up to 65,536 values. That's a 655-metre cube at 1 cm per voxel — enough for a village, a forest path, a small town. About **281 trillion** voxels addressable. The colour you see on screen is still literally the coordinate, just packed in two bytes per channel instead of one.
+
+**32-bit floats per channel** (RGBA32F) take it to 16.7 million per axis — a **167-kilometre cube**, big enough for a small city through an open countryside. Total addressable: about **5 sextillion** voxels. The colour-is-coord property gets slightly fuzzy here (floats aren't bit-exact integers above 2^24) but for practical purposes still works.
+
+**32-bit integers per channel** (RGBA32UI) take it to 4.29 *billion* per axis — that's a **42,000-kilometre cube** at 1 cm. Solar-system scale. Byte-perfect identity intact.
+
+Past that, you'd be modeling Earth-scale environments — at that point you stop adding bits and start being clever about *which* voxels you actually store (a sparse data structure: only the parts of the world that exist get a slot, not every theoretical position).
+
+</td>
+<td>
+
+We've got 32 bits of address space across 4 channels at RGBA8. The scheme generalises trivially to wider channels because the bijection itself is just `voxel_to_atlas(u, v, w) → (atlas_x, atlas_y)` arithmetic — it doesn't care about per-channel width.
+
+| Format | Per pixel | Per axis | Cube size @ 1 cm | Total addressable | Identity | GPU support |
+|---|---|---|---|---|---|---|
+| **RGBA8** | 4 B | 2⁸ = 256 | 2.5 m | 16.7M (2²⁴) | byte-perfect | universal |
+| **RGBA16UI** | 8 B | 2¹⁶ = 65,536 | 655 m | 281T (2⁴⁸) | uint16-perfect | WebGL2 + `EXT_color_buffer_integer` |
+| **RGBA16F** | 8 B | ≤1024 (mantissa) | 10 m | ≈10⁹ exact | lossy >1024 | WebGL2 native |
+| **RGBA32F** | 16 B | 2²⁴ = 16.7M (exact) | 167 km | 4.7 × 10²¹ | exact ≤2²⁴, lossy past | WebGL2 native |
+| **RGBA32UI** | 16 B | 2³² = 4.29B | 42,000 km | 7.9 × 10²⁸ | uint32-perfect | WebGL2 + `EXT_color_buffer_integer` |
+
+**Upgrade triggers:**
+
+- **256³ → 1024³ (RGBA16):** any scene larger than ~2.5 m at 1 cm voxels, or ~256 m at 1 m voxels. Realistic walkable scenes (hamlets, courtyards). Per-pixel atlas cost doubles to 8 B; 4096² atlas → 128 MB.
+- **1024³ → 65k³ (RGBA16):** same format, just bigger atlas (sharded across a texture array since 65k × 65k = 4.29B pixels exceeds single-texture limits). VRAM stays bounded by what you actually populate.
+- **65k³ → millions³ (RGBA32F or RGBA32UI):** city / regional scale. Storage becomes the constraint, not addressing. Need sparse virtual-tile data structures (à la GigaVoxels / Crassin) — coord space stays bijective within each leaf tile.
+- **Beyond:** sparse hashed page table. The byte-perfect coord-as-RGB property is preserved *inside* each leaf tile; cross-tile lookups need an indirection.
+
+**Pick RGBA16UI over RGBA16F** for any production use. The byte-perfect identity is what makes the whole scheme tractable for downstream consumers (ControlNet conditioning, picking buffers, picking-via-shader); fp16 mantissa precision compromises that above 1024.
+
+**Pick RGBA32UI over RGBA32F** for the same reason, with the caveat that `EXT_color_buffer_integer` is desktop-only (Quest 3's Adreno 740 supports it; older mobile may not). If portability matters, RGBA32F with `floor()` decode is the safer pick.
+
+For Gaussian splats specifically (one Gaussian per voxel-slot), RGBA16 addresses **~281 trillion potential splats** — orders of magnitude beyond what any production GPU can render (typical 3DGS scenes hit 1–100M; Lyra 2.0 trains on 90-metre walkable worlds at ~1B). The address space is never the constraint; **per-splat storage budget always is**.
+
+</td>
+</tr>
+</table>
+
+### Per-channel payload split (the orthogonal axis)
+
+The bits don't have to go entirely into the *address*. The split between address bits and payload bits is independent:
+
+| Strategy | Address bits | Payload bits | Use case |
+|---|---|---|---|
+| Pure address (RGB-coord, A-payload) | 24 | 8 | One class byte per voxel — current scheme |
+| Spatial-only address, 4 payload bytes | 24 | 32 | Class + confidence + obs + margin all packed (the actual current summary atlas) |
+| 4D address (RGBA-coord) | 32 | 0 | Time, scene-id, or class-histogram-bin as 4th dim. Payload lives elsewhere. |
+| Hybrid (RGB-coord, A as class) + sibling texture for confidence | 24 | 8 + payload texture | Decoupled. Standard for production pipelines. |
+
+The current code uses the second strategy: 24 bits of address (one byte per axis), 32 bits of payload (mode/conf/obs/margin). At RGBA16 you'd have 48 bits of address and 64 bits of payload — enough to pack class+confidence+observation-count+ambiguity-margin at full 16-bit precision per byte, or to store half-float Gaussian-splat parameters directly in the atlas without a sibling texture.
+
+---
+
 ## Prior art and credit
 
 This work recombines well-known graphics primitives in a way that's
