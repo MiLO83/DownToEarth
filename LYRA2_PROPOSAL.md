@@ -8,6 +8,103 @@ Apache-2.0-licensed Lyra source tree.
 
 ---
 
+## In plain English (the wins, the losses, the gist)
+
+### The setup
+
+**Lyra 2's current way:** keep a separate photo album for every photo it's
+ever taken of your house. If it photographs the kitchen from 5 angles,
+that's 5 album entries. To find "what's the kitchen wall?" it has to flip
+through every album looking for the right one.
+
+**Our proposed way:** keep a single floor-plan map of the house. Every
+spot on the map has a unique address. No matter how many photos you take
+of the kitchen wall, it stays in one place on the map. To find it, glance
+at the map once.
+
+That's the whole idea. Everything in the technical sections below follows
+from that.
+
+### Wins (why this could be worth it)
+
+1. **No more memory bloat from looking at the same thing twice.**
+   The camera can walk around a room and see the same wall fifty times.
+   Old way: fifty new entries. New way: the wall's spot on the map gets
+   refreshed in place. Memory stays the same size once the house is fully
+   mapped.
+
+2. **Finding stuff is one step, not fifty.**
+   "Where's the kitchen wall?" Old way: flip through every photo album.
+   New way: read the address off the map. The bigger the cache gets, the
+   bigger the gap.
+
+3. **Same place, same name.**
+   The model never has to figure out "wait, is this kitchen wall from
+   album 3 the same as kitchen wall from album 7?" The map address IS
+   the identity. One thing, one name, no ambiguity.
+
+4. **You can look at the map and read it.**
+   Today the photo-album labels are codes like "album 47, photo 12, pixel
+   (143, 89)." The new map's labels are actual map coordinates — you can
+   literally print the map and a person can read it. Debugging stops
+   being a guessing game.
+
+5. **Neighbours stay neighbours.**
+   On the map, two spots physically next to each other in the real world
+   are also physically next to each other on the page. Your GPU loves
+   this — it can grab a whole little chunk of map at once, instead of
+   running off to fetch random photo albums from across storage. Modest
+   speed-up, basically free.
+
+### Losses (why this isn't a slam dunk)
+
+1. **The map has a grid; tiny details below grid size disappear.**
+   At the cheapest setting (1 byte per axis), each map square is about
+   1 cm. Two things half a centimetre apart get squashed into the same
+   square. For most architecture-scale stuff this is fine. For very tiny
+   detail you'd need a finer map (more bytes per axis), which costs more
+   memory.
+
+2. **You can't make a single map of the whole world.**
+   A bedroom-sized map works great. A city-sized map needs to be folders
+   of regional maps. A continent-sized map needs folders of folders.
+   Lyra 2's specialty is "walk-forever" scenes — those need the
+   folder-of-maps version, which is more engineering work. We sketched
+   how but didn't build it.
+
+3. **The model has to learn a new language.**
+   Today's Lyra 2 has been trained to read photo-album labels. To switch
+   to map addresses, the model needs to be re-taught — that's roughly
+   six weeks of training on 64 of NVIDIA's most expensive GPUs. We can't
+   do this; only NVIDIA can. So this is a "if you're already planning to
+   retrain, consider folding this in" proposal, not a drop-in patch.
+
+4. **The map doesn't remember WHEN you mapped each spot.**
+   Photo albums have dates. "This album was from yesterday, that one was
+   from last month — trust yesterday's more." The map just shows the
+   latest state of each spot. To get the "when" back you'd attach a
+   little timestamp byte to each map cell (we have a spare byte in our
+   4-byte-per-cell budget; it's already documented). Not lost, just an
+   extra design choice.
+
+5. **It only helps if there's stuff to map.**
+   For a single static photo with no exploration, both approaches do
+   basically the same thing. The wins kick in as the camera moves
+   around and the same locations get re-observed — which IS Lyra 2's
+   actual job, so it's the right shape, but worth being honest: a
+   one-shot single-frame use-case sees almost no benefit.
+
+### The honest one-liner
+
+> *Lyra 2 already computes the world-coords of every pixel — it just
+> throws that information into a photo-album-style index. Re-indexing
+> into a map-style atlas is the architectural shift; it's cleaner,
+> faster, and bounded by scene size instead of frame count, but it
+> costs a retrain and the addressable world is now finite (or
+> hierarchical). That's the whole trade.*
+
+---
+
 ## Summary
 
 Lyra 2's canonical-coord conditioning is **image-space-and-frame-indexed**:
