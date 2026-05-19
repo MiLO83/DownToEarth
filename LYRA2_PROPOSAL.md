@@ -222,7 +222,7 @@ downsample = 4**. ✶ = calculated from the codebase. † = estimated.
 
 | Dimension | Current (Lyra 2 frame-keyed) | Proposed (world-coord atlas) | Delta |
 |---|---|---|---|
-| **Canonical-coord image size, per chunk** | 5 × 3 × 480 × 832 × fp16 = **11.4 MB** ✶ | 5 × 3 × 480 × 832 × uint8 = **1.14 MB** (RGBA8) / 2.28 MB (RGBA16) ✶ | **10× smaller** (RGBA8) / 5× (RGBA16) |
+| **Canonical-coord image size, per chunk** | 5 × 3 × 480 × 832 × fp16 = **11.4 MB** ✶ | RGBA8: **5.71 MB** / RGBA16UI: 11.4 MB / RGBA32F: 22.9 MB ✶ | RGBA8: **2× smaller** than fp16 / 4× smaller than fp32; RGBA16: parity |
 | **Cache memory: `_world_points`, after 80 frames** | 80 × (480/4) × (832/4) × 3 × fp32 = **24 MB** ✶ | 256³ atlas × 4 B (RGBA8) = **64 MB** fixed (1024³ → ~4 GB texture array) † | Larger up front, **flat with time** vs. linear |
 | **Cache memory: with `store_values=True` (full depth + w2c + K + RGB latents)** | 80 × (480 × 832 × fp32 depth + intrinsics + latents) ≈ **130 MB + frame latents** ✶ | Atlas + per-slot payload bytes; no per-frame redundant storage. ~64 MB to ~1 GB scene-dependent. † | Scene-complexity-bound, not time-bound |
 | **Memory growth on revisits** (camera re-enters region already seen) | Linear: every frame adds a slot whether new or not | Flat: same world-coord slot gets reinforced, no new allocation | **O(time) → O(scene)** |
@@ -238,6 +238,44 @@ downsample = 4**. ✶ = calculated from the codebase. † = estimated.
 | **Code surface area (LoC change)** | — | `_build_canonical_spatial_coords` rewrite (~50 LoC) + `Sparse3DCache` dual-key mode (~100 LoC) + new `uvw_atlas.py` (~150 LoC). **~300 LoC net add.** † | Small |
 | **Training-compat impact** | — | **Full retrain or fine-tune the conditioning head**: model expects different statistics on the input channels. ‡ | Significant — needs NVIDIA training infra |
 | **Inference latency (per 80-frame step)** | ~194 s on GB200 (full), ~15 s (DMD-distilled) ✶ (from paper) | Estimate: ~1–3 % reduction from cheaper canonical-coord pass + O(1) retrieval; possible 5–10 % reduction at long-horizon revisits where current retrieve() dominates ‡ | Modest, possibly meaningful at scale |
+
+### Byte-length comparison (per-channel precision)
+
+Held constant: Lyra 2 res (832 × 480), 5 spatial slots, 3 coord channels,
+a single inference chunk. Atlas dims assume the maximum single-texture
+limit (16384²) at each format; beyond that you need a texture array or
+sparse-tiled scheme.
+
+| Format | Bytes / axis | Max axis val | World @ 1 cm cells | World @ 1 mm cells | Canonical img (5×3×480×832) | Single-texture atlas footprint | Identity flavour | GPU support |
+|---|---|---|---|---|---|---|---|---|
+| **RGBA8** (uint8) | 1 | 256 | 2.56 m | 25.6 cm | **5.71 MB** | 16384² × 4 B = **1 GB** | byte = coord (exact) | universal |
+| **RGBA16UI** (uint16) | 2 | 65,536 | **655 m** | 65.5 m | 11.4 MB | 16384² × 8 B = **2 GB** | uint16 = coord (exact) | WebGL2 + `EXT_color_buffer_integer` |
+| **RGBA16F** (half) | 2 | 1,024 (mantissa) | 10.2 m | 1.02 m | 11.4 MB | 16384² × 8 B = **2 GB** | float ≈ coord (exact ≤ 2¹⁰, lossy after) | WebGL2 native |
+| **RGBA32F** (float32) | 4 | 16.7M (exact) | **167 km** | **16.7 km** | 22.9 MB | 16384² × 16 B = **4 GB** | float = coord (exact ≤ 2²⁴) | WebGL2 native |
+| **RGBA32UI** (uint32) | 4 | 4.29B | **42,000 km** | **4,200 km** | 22.9 MB | 16384² × 16 B = **4 GB** | uint32 = coord (exact) | WebGL2 + `EXT_color_buffer_integer` |
+
+**Same dimensions vs. Lyra 2's existing fp16 / fp32 canonical-coord image:**
+
+| Lyra 2 today | Proposed equivalent | Image size delta | Identity delta |
+|---|---|---|---|
+| Current: fp16 (2 B/axis) | RGBA8 (1 B/axis) | **2× smaller image** | Quantize: 1 cm @ 2.5 m world, but **byte-perfect** vs. fp16's float-rounding |
+| Current: fp16 (2 B/axis) | RGBA16UI (2 B/axis) | **Same size** | byte-perfect vs. float-rounding; 655 m @ 1 cm world available |
+| Current: fp32 (4 B/axis) | RGBA16UI (2 B/axis) | **2× smaller** | byte-perfect; 655 m @ 1 cm reach |
+| Current: fp32 (4 B/axis) | RGBA32UI (4 B/axis) | Same size | byte-perfect vs. float-rounding; effectively unbounded |
+
+### Recommendation by Lyra 2 use-case
+
+| Scene scale | Recommended format | Atlas storage | Notes |
+|---|---|---|---|
+| ≤ 2.5 m (single room / character) | **RGBA8** | 64 MB at 256³ | Plenty for the bounded variant; pairs with single 4096² texture, the original DownToEarth target |
+| 2.5–655 m (city block, building cluster) | **RGBA16UI** | 1–2 GB texture array | Matches Lyra 2's typical 90 m world spec at sub-cm precision |
+| 655 m – 167 km (urban / regional) | **RGBA32F** | Sparse-tiled, scene-dependent | Mantissa exact to 2²⁴; lose strict byte-identity outside that |
+| Unbounded (continent+) | **Hierarchical sparse + RGBA32UI** | Octree-style page table | Byte-identity preserved **within each leaf tile**; cross-tile is one indirection |
+
+The format choice is **independent** of the architectural proposal —
+even at RGBA8 you get the structural wins (one key per 3D point, O(1)
+retrieval, memory bounded by scene-not-time). The byte width just sets
+the addressable world size.
 
 ### What this table is *not*
 
