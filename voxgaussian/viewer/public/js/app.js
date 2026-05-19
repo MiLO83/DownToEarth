@@ -51,6 +51,8 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 1, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.1;
+controls.listenToKeyEvents(window);   // arrow keys pan without canvas focus
+controls.keyPanSpeed = 12;
 controls.update();
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
@@ -69,7 +71,6 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  uvwDecodeRT.setSize(innerWidth, innerHeight);
 });
 
 // ─── Occupancy-cube renderer ────────────────────────────────────────────
@@ -200,17 +201,6 @@ let classColors = {};
 let lastSnapshot = null;
 let renderMode = 'cubes';   // 'cubes' | 'uvw' | 'gaussian'
 
-// UVW-mode state. Populated by renderVoxels.
-const uvwSummaryMap = new Map();  // key: (u|v<<8|w<<16) >>> 0 → {cls, conf, obs, margin}
-const uvwState = { resolution: 0, tilesPerRow: 0, tilesPerCol: 0, atlasW: 0, atlasH: 0 };
-const uvwDecodeRT = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
-  minFilter: THREE.NearestFilter,
-  magFilter: THREE.NearestFilter,
-  format: THREE.RGBAFormat,
-  type: THREE.UnsignedByteType,
-  depthBuffer: true,
-});
-
 document.querySelectorAll('#mode-toggle .btn').forEach(b => {
   b.addEventListener('click', () => {
     document.querySelectorAll('#mode-toggle .btn').forEach(x => x.classList.remove('active'));
@@ -219,9 +209,6 @@ document.querySelectorAll('#mode-toggle .btn').forEach(b => {
     cubesMesh.visible = renderMode === 'cubes' || renderMode === 'uvw';
     cubesMesh.material = renderMode === 'uvw' ? matCanonical : voxelMat;
     gaussMesh.visible = renderMode === 'gaussian' && gaussMesh.count > 0;
-    document.getElementById('uvw-hud').style.display = renderMode === 'uvw' ? 'block' : 'none';
-    document.getElementById('hud').style.display = renderMode === 'uvw' ? 'none' : 'block';
-    document.getElementById('legend').style.display = renderMode === 'uvw' ? 'none' : 'block';
   });
 });
 
@@ -238,21 +225,6 @@ function renderVoxels(snapshot) {
   // facing" if its surface normal points toward the chunk centroid.
   const cx = centroid?.[0] ?? 0, cy = centroid?.[1] ?? 1, cz = centroid?.[2] ?? 0;
   let culled = 0;
-
-  // (UVW) Refresh layout if resolution changed, and clear the per-voxel
-  // summary lookup. Resolutions ≤ 256 give a byte-perfect canonical bijection.
-  if (resolution !== uvwState.resolution) {
-    const { tilesPerRow, tilesPerCol } = tileLayout(resolution);
-    uvwState.resolution = resolution;
-    uvwState.tilesPerRow = tilesPerRow;
-    uvwState.tilesPerCol = tilesPerCol;
-    uvwState.atlasW = tilesPerRow * resolution;
-    uvwState.atlasH = tilesPerCol * resolution;
-    document.getElementById('uvw-atlas-dims').textContent =
-      `${uvwState.atlasW}×${uvwState.atlasH}`;
-    document.getElementById('uvw-res').textContent = `${resolution}³`;
-  }
-  uvwSummaryMap.clear();
 
   let n = 0;
   for (let i = 0; i < cells.length && n < MAX_VOXELS; i++) {
@@ -291,22 +263,10 @@ function renderVoxels(snapshot) {
     }
     cubesMesh.instanceColor.setXYZ(n, cr, cg, cb);
 
-    // UVW: store per-voxel canonical coord on the instance + populate the
-    // hover-decode summary map. Per voxel_store.py snapshot spec:
-    //   row[4]  = confidence byte (mode_count / total)
-    //   row[14] = obs_log byte    (log2(total + 1) * 16, clamped)
-    //   row[15] = margin byte     ((top - runner) / total * 255)
-    // Fall back to estimates for older short rows (backward-compat).
+    // UVW: store per-voxel canonical coord on the instance so the
+    // canonical-pass shader (matCanonical) can render each cube tinted by
+    // its own (u, v, w) byte-identity. No hover-decode anymore.
     cubeUvwAttr.setXYZ(n, ix, iy, iz);
-    const confByte = Math.max(0, Math.min(255, row[4] ?? 0));
-    const obsLog = row.length >= 15
-      ? Math.max(0, Math.min(255, row[14]))
-      : Math.min(255, Math.round(Math.log2((snapshot.iteration || 1) + 1) * 16));
-    const margin = row.length >= 16
-      ? Math.max(0, Math.min(255, row[15]))
-      : Math.min(255, Math.round(confByte * 0.85));
-    const key = (ix | (iy << 8) | (iz << 16)) >>> 0;
-    uvwSummaryMap.set(key, { cls, conf: confByte, obs: obsLog, margin });
 
     _tmpMatrix.compose(new THREE.Vector3(x, y, z), _tmpQuat, _tmpScale);
     cubesMesh.setMatrixAt(n, _tmpMatrix);
@@ -523,92 +483,12 @@ function scheduleReconnect() {
 }
 connect();
 
-// ─── UVW hover decode ───────────────────────────────────────────────────
-// In UVW mode the canonical pass also writes to an offscreen RT each frame;
-// on mousemove we readPixels(1×1) at the cursor → those bytes ARE the voxel
-// coord → JS Map lookup gives class/confidence/margin in one step.
-
-const _uvwReadBuf = new Uint8Array(4);
-const _classNames = ["empty","sky","ground","path","water","wall","building","vegetation","prop","character","fx"];
-
-renderer.domElement.addEventListener('mousemove', (ev) => {
-  if (renderMode !== 'uvw') return;
-  const rect = renderer.domElement.getBoundingClientRect();
-  const px = (ev.clientX - rect.left) * renderer.getPixelRatio() | 0;
-  // WebGL pixel origin is bottom-left, DOM is top-left.
-  const py = (rect.height - (ev.clientY - rect.top)) * renderer.getPixelRatio() | 0;
-  renderer.readRenderTargetPixels(uvwDecodeRT, px, py, 1, 1, _uvwReadBuf);
-  const [r, g, b, a] = _uvwReadBuf;
-
-  const ui = {
-    rgb:    document.getElementById('uvw-rgb'),
-    voxel:  document.getElementById('uvw-voxel'),
-    atlas:  document.getElementById('uvw-atlas'),
-    cls:    document.getElementById('uvw-class'),
-    swatch: document.getElementById('uvw-swatch'),
-    conf:   document.getElementById('uvw-conf'),
-    confBar: document.getElementById('uvw-conf-bar'),
-    obs:    document.getElementById('uvw-obs'),
-    margin: document.getElementById('uvw-margin'),
-  };
-
-  if (a < 16) {
-    ui.rgb.textContent = '(background)';
-    ui.voxel.textContent = '—';
-    ui.atlas.textContent = '—';
-    ui.cls.textContent = '—';
-    ui.swatch.style.background = '#000';
-    ui.conf.textContent = '—';
-    ui.confBar.style.width = '0%';
-    ui.obs.textContent = '—';
-    ui.margin.textContent = '—';
-    return;
-  }
-
-  // The canonical-pass bytes ARE the voxel coord. No math.
-  const u = r, v = g, w = b;
-  const [ax, ay] = voxelToAtlas(u, v, w, uvwState.resolution, uvwState.tilesPerRow);
-  ui.rgb.textContent = `${r}, ${g}, ${b}`;
-  ui.voxel.textContent = `${u}, ${v}, ${w}`;
-  ui.atlas.textContent = `${ax}, ${ay}`;
-
-  const key = (u | (v << 8) | (w << 16)) >>> 0;
-  const sum = uvwSummaryMap.get(key);
-  if (!sum) {
-    ui.cls.textContent = '(unmapped)';
-    ui.swatch.style.background = '#000';
-    ui.conf.textContent = '—';
-    ui.confBar.style.width = '0%';
-    ui.obs.textContent = '—';
-    ui.margin.textContent = '—';
-    return;
-  }
-
-  ui.cls.textContent = `${sum.cls} · ${_classNames[sum.cls] || '?'}`;
-  ui.swatch.style.background = classColors[sum.cls] || '#000';
-  ui.conf.textContent = `${(sum.conf / 255 * 100).toFixed(1)}%`;
-  ui.confBar.style.width = (sum.conf / 255 * 100) + '%';
-  ui.obs.textContent = sum.obs > 0 ? `≈ 2^${(sum.obs / 16).toFixed(1)}` : '—';
-  ui.margin.textContent = `${(sum.margin / 255 * 100).toFixed(1)}%`;
-});
-
 // ─── Animation loop ─────────────────────────────────────────────────────
+// Hover-decode was removed: UVW mode is now a pure visual rendering toggle
+// — cubes are colored by their own (u, v, w) byte-identity via matCanonical.
+// One render pass per frame regardless of mode.
 
 renderer.setAnimationLoop(() => {
   controls.update();
-  if (renderMode === 'uvw') {
-    // Offscreen RT for hover-decode readback: drop the scene background and
-    // hide the grid so only the cubes write color/alpha — that way a 1-pixel
-    // readPixels returns either (uvw, 1.0) for a hit or (0, 0, 0, 0) for a
-    // miss, and we can distinguish via alpha alone.
-    const savedBG = scene.background;
-    scene.background = null;
-    grid.visible = false;
-    renderer.setRenderTarget(uvwDecodeRT);
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(null);
-    scene.background = savedBG;
-    grid.visible = true;
-  }
   renderer.render(scene, camera);
 });

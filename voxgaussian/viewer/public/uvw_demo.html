@@ -46,8 +46,10 @@
   }
   html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); overflow: hidden;
     font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--text); }
-  #stage { position: fixed; inset: 0; display: flex; }
-  .pane { flex: 1; position: relative; border-right: 1px solid rgba(255,255,255,0.08); }
+  /* Stage is a visual-only container — pointer events fall through to the
+     canvas below so OrbitControls receives mouse drag/scroll/right-drag. */
+  #stage { position: fixed; inset: 0; display: flex; pointer-events: none; }
+  .pane { flex: 1; position: relative; border-right: 1px solid rgba(255,255,255,0.08); pointer-events: none; }
   .pane:last-child { border-right: none; }
   .pane-label { position: absolute; top: 12px; left: 12px;
     background: var(--panel); border: 1px solid var(--panel-border);
@@ -73,6 +75,8 @@
   #hud .bar > .fill { height: 100%; background: var(--accent); }
   #hud .group { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); }
   #hud .group:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+  #hud-legend .legend-row { display: flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.6; }
+  #hud-legend .legend-swatch { width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.4); }
   #title {
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
     background: var(--panel); border: 1px solid var(--panel-border);
@@ -97,12 +101,6 @@
     letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
   #atlas-inset canvas { width: 256px; height: 256px; image-rendering: pixelated;
     background: #000; border-radius: 4px; display: block; }
-  #atlas-inset .crosshair {
-    position: absolute; width: 12px; height: 12px;
-    border: 2px solid var(--accent); border-radius: 50%;
-    pointer-events: none; transform: translate(-50%, -50%);
-    box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
-  }
 </style>
 </head>
 <body>
@@ -113,34 +111,22 @@
 <div id="title">voxel ↔ rgb bijection  ·  <b>identity inherited, zero VRAM</b></div>
 <div id="hud">
   <div class="group">
-    <div class="k">cursor</div>
-    <div class="row"><span>screen</span><span class="v" id="hud-screen">—</span></div>
-    <div class="row"><span>canonical rgb</span><span class="v" id="hud-rgb">—</span></div>
-    <div class="row"><span>voxel (u, v, w)</span><span class="v" id="hud-voxel">—</span></div>
-    <div class="row"><span>atlas pixel</span><span class="v" id="hud-atlas">—</span></div>
-  </div>
-  <div class="group">
-    <div class="k">summary sample</div>
-    <div class="row"><span><span class="swatch" id="hud-swatch"></span>class</span><span class="v" id="hud-class">—</span></div>
-    <div class="row"><span>confidence</span><span class="v" id="hud-conf">—</span></div>
-    <div class="bar"><div class="fill" id="hud-conf-bar" style="width:0%"></div></div>
-    <div class="row"><span>observations (log)</span><span class="v" id="hud-obs">—</span></div>
-    <div class="bar"><div class="fill" id="hud-obs-bar" style="width:0%"></div></div>
-    <div class="row"><span>ambiguity margin</span><span class="v" id="hud-margin">—</span></div>
-    <div class="bar"><div class="fill" id="hud-margin-bar" style="width:0%"></div></div>
-  </div>
-  <div class="group">
     <div class="k">scene</div>
     <div class="row"><span>voxels active</span><span class="v" id="hud-voxels">—</span></div>
     <div class="row"><span>atlas usage</span><span class="v" id="hud-usage">—</span></div>
+    <div class="row"><span>atlas dims</span><span class="v">4096²</span></div>
+    <div class="row"><span>resolution</span><span class="v">256³</span></div>
+  </div>
+  <div class="group">
+    <div class="k">classes</div>
+    <div id="hud-legend"></div>
   </div>
 </div>
 <div id="atlas-inset" style="position: fixed;">
-  <div class="lbl">summary atlas · 4096²</div>
+  <div class="lbl">summary atlas · 4096² (class palette downsample)</div>
   <canvas id="atlas-canvas" width="256" height="256"></canvas>
-  <div class="crosshair" id="atlas-crosshair" style="display: none;"></div>
 </div>
-<div id="footer">drag to orbit · scroll to zoom · hover anywhere to decode the voxel under the cursor</div>
+<div id="footer">drag to orbit · scroll to zoom · right-drag to pan · arrow keys to nudge</div>
 
 <script type="importmap">
 {
@@ -315,10 +301,14 @@ cameraL.lookAt(0, 8, 0);
 const cameraR = cameraL.clone();
 
 // Linked orbit: control left camera, copy to right.
+// We attach controls to the canvas, and `listenToKeyEvents(window)` lets
+// arrow keys pan without requiring the canvas to be focused.
 const controls = new OrbitControls(cameraL, canvas);
 controls.target.set(0, 8, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
+controls.listenToKeyEvents(window);
+controls.keyPanSpeed = 12;
 
 // ─── Geometry: one InstancedMesh sharing voxel coords across both shaders ──
 const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
@@ -434,14 +424,6 @@ const matCanonical = new THREE.ShaderMaterial({
   fragmentShader: FRAG_CANONICAL,
 });
 
-// ─── Offscreen RT for hover-decode (samples the canonical pass) ─────────
-const decodeRT = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
-  minFilter: THREE.NearestFilter,
-  magFilter: THREE.NearestFilter,
-  format: THREE.RGBAFormat,
-  type: THREE.UnsignedByteType,
-});
-
 // ─── Atlas inset preview (2D canvas) ────────────────────────────────────
 const atlasCanvas = document.getElementById('atlas-canvas');
 const atlasCtx = atlasCanvas.getContext('2d');
@@ -490,21 +472,9 @@ function render() {
   const w = innerWidth, h = innerHeight;
   const halfW = w / 2 | 0;
 
-  // (1) Render canonical pass to the offscreen RT (full size; we'll sample any pixel).
-  mesh.material = matCanonical;
-  renderer.setRenderTarget(decodeRT);
-  renderer.setViewport(0, 0, w, h);
-  renderer.setScissor(0, 0, w, h);
-  renderer.setScissorTest(false);
-  renderer.clear(true, true, true);
-  // For the offscreen pass, render with the LEFT camera (the controlled one).
-  renderer.render(scene, cameraL);
-
-  // (2) Render to the visible canvas in two viewports.
-  renderer.setRenderTarget(null);
   renderer.setScissorTest(true);
 
-  // Left: summary atlas pass.
+  // Left: summary atlas pass (cubes colored by class via summary atlas).
   mesh.material = matSummary;
   renderer.setViewport(0, 0, halfW, h);
   renderer.setScissor(0, 0, halfW, h);
@@ -512,7 +482,7 @@ function render() {
   renderer.clear(true, true, true);
   renderer.render(scene, cameraL);
 
-  // Right: canonical pass (visible).
+  // Right: canonical pass (cubes colored by uvw/255 — the byte-perfect identity).
   mesh.material = matCanonical;
   renderer.setViewport(halfW, 0, w - halfW, h);
   renderer.setScissor(halfW, 0, w - halfW, h);
@@ -526,101 +496,31 @@ render();
 
 addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
-  decodeRT.setSize(innerWidth, innerHeight);
 });
 
-// ─── Hover decode ───────────────────────────────────────────────────────
-const hud = {
-  screen: document.getElementById('hud-screen'),
-  rgb: document.getElementById('hud-rgb'),
-  voxel: document.getElementById('hud-voxel'),
-  atlas: document.getElementById('hud-atlas'),
-  cls: document.getElementById('hud-class'),
-  swatch: document.getElementById('hud-swatch'),
-  conf: document.getElementById('hud-conf'),
-  confBar: document.getElementById('hud-conf-bar'),
-  obs: document.getElementById('hud-obs'),
-  obsBar: document.getElementById('hud-obs-bar'),
-  margin: document.getElementById('hud-margin'),
-  marginBar: document.getElementById('hud-margin-bar'),
-  voxels: document.getElementById('hud-voxels'),
-  usage: document.getElementById('hud-usage'),
-};
-hud.voxels.textContent = voxelCount.toLocaleString();
-hud.usage.textContent = ((voxelCount / (ATLAS_SIZE * ATLAS_SIZE)) * 100).toFixed(3) + '%';
+// ─── HUD: static scene info + class legend ──────────────────────────────
+document.getElementById('hud-voxels').textContent = voxelCount.toLocaleString();
+document.getElementById('hud-usage').textContent =
+  ((voxelCount / (ATLAS_SIZE * ATLAS_SIZE)) * 100).toFixed(3) + '%';
 
-const atlasCrosshair = document.getElementById('atlas-crosshair');
-const atlasInset = document.getElementById('atlas-inset');
-
-const readBuf = new Uint8Array(4);
-let lastReadFrame = 0;
-
-canvas.addEventListener('mousemove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const sx = (e.clientX - rect.left) * renderer.getPixelRatio() | 0;
-  const sy = (rect.height - (e.clientY - rect.top)) * renderer.getPixelRatio() | 0;
-
-  hud.screen.textContent = `${e.clientX | 0}, ${e.clientY | 0}`;
-
-  // Read one pixel from the canonical RT.
-  // (The canonical RT is rendered full-size with cameraL, so any cursor pos works.)
-  renderer.readRenderTargetPixels(decodeRT, sx, sy, 1, 1, readBuf);
-  const [r, g, b, a] = readBuf;
-
-  if (a < 16) {
-    // Background — no voxel under cursor.
-    hud.rgb.textContent = `(background)`;
-    hud.voxel.textContent = '—';
-    hud.atlas.textContent = '—';
-    hud.cls.textContent = '—';
-    hud.conf.textContent = '—';
-    hud.obs.textContent = '—';
-    hud.margin.textContent = '—';
-    hud.confBar.style.width = '0%';
-    hud.obsBar.style.width = '0%';
-    hud.marginBar.style.width = '0%';
-    hud.swatch.style.background = '#000';
-    atlasCrosshair.style.display = 'none';
-    return;
+// Build the class legend from the actual classes present in the scene.
+{
+  const present = new Set();
+  for (const { cls } of occ.values()) present.add(cls);
+  const legend = document.getElementById('hud-legend');
+  for (const cid of [...present].sort((a, b) => a - b)) {
+    const row = document.createElement('div');
+    row.className = 'legend-row';
+    const sw = document.createElement('span');
+    sw.className = 'legend-swatch';
+    sw.style.background = CLASS_COLORS_HEX[cid] || '#fff';
+    row.appendChild(sw);
+    const lbl = document.createElement('span');
+    lbl.textContent = `${cid} · ${CLASSES[cid] || '?'}`;
+    row.appendChild(lbl);
+    legend.appendChild(row);
   }
-
-  // The canonical bytes ARE the voxel coord. No math required.
-  const u = r, v = g, w = b;
-  const [ax, ay] = voxelToAtlas(u, v, w);
-
-  hud.rgb.textContent = `${r}, ${g}, ${b}`;
-  hud.voxel.textContent = `${u}, ${v}, ${w}`;
-  hud.atlas.textContent = `${ax}, ${ay}`;
-
-  // Now sample the summary atlas at that position.
-  const idx = (ay * ATLAS_SIZE + ax) * 4;
-  const sCls = atlasBytes[idx + 0];
-  const sConf = atlasBytes[idx + 1];
-  const sObs = atlasBytes[idx + 2];
-  const sMargin = atlasBytes[idx + 3];
-
-  hud.cls.textContent = sConf > 0 ? `${sCls} · ${CLASSES[sCls] || '?'}` : '—';
-  hud.swatch.style.background = sConf > 0 ? CLASS_COLORS_HEX[sCls] || '#000' : '#000';
-  hud.conf.textContent = sConf > 0 ? `${(sConf / 255 * 100).toFixed(1)}%` : '—';
-  hud.confBar.style.width = (sConf / 255 * 100) + '%';
-  hud.obs.textContent = sObs > 0 ? `≈ 2^${(sObs / 16).toFixed(1)}` : '—';
-  hud.obsBar.style.width = (sObs / 255 * 100) + '%';
-  hud.margin.textContent = sConf > 0 ? `${(sMargin / 255 * 100).toFixed(1)}%` : '—';
-  hud.marginBar.style.width = (sMargin / 255 * 100) + '%';
-
-  // Position the crosshair on the atlas inset (4096→256 downsample, so divide by 16).
-  const insetRect = atlasInset.getBoundingClientRect();
-  // The canvas sits at (8, headerHeight) inside the inset; we approximate by
-  // anchoring to the canvas's own getBoundingClientRect.
-  const aRect = atlasCanvas.getBoundingClientRect();
-  atlasCrosshair.style.display = 'block';
-  atlasCrosshair.style.left = (aRect.left + ax / 16) + 'px';
-  atlasCrosshair.style.top  = (aRect.top  + ay / 16) + 'px';
-});
-
-canvas.addEventListener('mouseleave', () => {
-  atlasCrosshair.style.display = 'none';
-});
+}
 
 // ─── Console output for self-verification ──────────────────────────────
 console.log(`[uvw_demo] ${voxelCount.toLocaleString()} voxels baked into a ${ATLAS_SIZE}² summary atlas.`);
