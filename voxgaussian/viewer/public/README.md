@@ -17,9 +17,10 @@
 >    rendering. Both panes are the same data, just different shaders.)*
 >
 > 📄 **Read offline / share:**
-> - [README.pdf](https://downtoearth-9lq.pages.dev/README.pdf) (856 KB · 8 pages)
+> - [README.pdf](https://downtoearth-9lq.pages.dev/README.pdf) (~1 MB · 9 pages)
 > - [LYRA2_PROPOSAL.pdf](https://downtoearth-9lq.pages.dev/LYRA2_PROPOSAL.pdf) (482 KB · the architectural RFC)
-> - Markdown-rendered on .dev: [/readme](https://downtoearth-9lq.pages.dev/readme) · [/proposal](https://downtoearth-9lq.pages.dev/proposal)
+> - **🧒 [DUMMIES.pdf](https://downtoearth-9lq.pages.dev/DUMMIES.pdf)** (510 KB · *full project explained without computer-talk, for non-technical readers*)
+> - Markdown-rendered on .dev: [/readme](https://downtoearth-9lq.pages.dev/readme) · [/proposal](https://downtoearth-9lq.pages.dev/proposal) · [/dummies](https://downtoearth-9lq.pages.dev/dummies)
 
 A JRPG-style WebXR walker plus the **bidirectional voxel ↔ RGB atlas** data
 structure we built for it. The walker is the playground; the atlas is the
