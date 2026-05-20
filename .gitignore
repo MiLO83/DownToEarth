@@ -32,3 +32,6 @@ Thumbs.db
 *.tmp
 Screenshot*.png
 voxgaussian/workflows/_scratch/
+
+# Private documents (not for public distribution — share directly with recipients)
+private/
