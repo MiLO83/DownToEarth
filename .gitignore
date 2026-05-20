@@ -35,3 +35,17 @@ voxgaussian/workflows/_scratch/
 
 # Private documents (not for public distribution — share directly with recipients)
 private/
+
+# Posterize pipeline datasets (re-downloadable from picsum; ~8 GB at 2k images)
+voxgaussian/posterize/data/
+voxgaussian/posterize/ckpts/
+voxgaussian/posterize/_smoke/
+
+# Full conversation transcripts (large; session-scoped; preserved locally)
+conversation_*.log
+conversation_*.txt
+
+# RIFE / Lyra2 setup artifacts (vendored Practical-RIFE has its own license/repo)
+voxgaussian/posterize/Practical-RIFE/
+ODARA_extracted.md
+Pixels_extracted.md

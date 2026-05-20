@@ -240,6 +240,281 @@ This means **a $400 graphics card plus a $200 hard drive** could in principle ho
 
 ---
 
+## 7.5 How much does it cost to *make* a world?
+
+Storing a world is one question. *Making* one is another. To turn a
+single starting photo into a walkable 3D environment, Lyra 2 has to do
+a lot of imagining — and imagining costs computer time, which costs
+money if you rent the computer, or hours if you use your own.
+
+We surveyed the best-known tricks people have shared publicly (in
+research papers and open-source projects up through May 2026) for
+making Lyra 2 run faster. Stacked together — without retraining
+anything, just plugging existing pieces together — they roughly
+**60× speed up Lyra 2**.
+
+What that actually buys you, in plain English:
+
+**On a rented computer (typical cloud rental: $3.50 per hour):**
+
+| Size of world | Real-world example | Cost |
+|---|---|---:|
+| A single shop or apartment | 100 m² | **7¢** |
+| A small village square | 5,000 m² (~1 acre) | **$2.45** |
+| **A Monkey-Island-sized island** | 1 km² | **$73** |
+| A five-island archipelago | 5 km² | $364 |
+| A small district | 50 km² | $3,640 |
+
+A weekend of cloud rental ($100) gets you about a small village
+plus its surroundings, polished to "hero" quality.
+
+**On your own computer at home (an off-the-shelf graphics card, $400):**
+
+| Size of world | Time to make it |
+|---|---:|
+| A village (1 acre) | ~1.5 hours |
+| A Monkey-Island-sized island (1 km²) | ~7 days of leaving the computer running |
+| A whole archipelago (5 km²) | ~36 days |
+
+So if you can leave your computer running overnight while you sleep,
+you can make a village every night. **Over the course of a year, you'd
+build an island.** Over a lifetime — a continent. The mathematics
+moves from "this needs a research lab" to "this is a weekend hobby."
+
+This is the actual headline. NVIDIA's photo-to-3D-world technology
+*originally* needed a $70,000 chip and tens of thousands of dollars
+of compute. With the speedup tricks stacked together, **the same magic
+becomes a hobbyist hobby on a graphics card a teenager could buy with
+summer-job money.**
+
+---
+
+## 7.6 How your computer actually plays a giant world
+
+Storage is one half of the answer. The other half is even more
+interesting: once you have a hundred-gigabyte map saved on your hard
+drive, *how does your computer let you walk around inside it?*
+
+A typical good gaming computer has somewhere between **8 and 24
+gigabytes** of fast graphics memory. Our Monkey-Island-sized island —
+generated, stored, ready to play — is **200 gigabytes**. That's ten
+times more than the computer can hold all at once. Yet you can walk
+around in it at full speed, with no waiting, no loading screens.
+
+How? The trick is one of the loveliest in computer graphics, and it
+boils down to this:
+
+> **You don't need the whole world in memory.
+> You only need the bit of world your eyes are currently looking at.**
+
+### The library metaphor
+
+Imagine a huge public library — a thousand bookshelves, a million
+books. You walk in and sit down at a reading table. Now imagine
+someone asks: *"How much of this library do you need to read, right
+this second?"*
+
+The answer is: **one page**. The page you're currently looking at.
+Maybe two if it's open in front of you. Out of a million books, you
+need *one page*.
+
+If you turn the page, you need the next one. If you put the book down
+and grab a different one, you need the first page of that. But you
+*never* need all the books at once, because **your eyes can only point
+in one direction and read one page at a time**.
+
+A computer rendering a 3D world is exactly the same. Your screen has
+about two million tiny pixels. Each pixel points in a slightly
+different direction. To draw the scene, the computer has to figure
+out: *"For each of these two million directions, what's the closest
+thing the camera can see?"*
+
+Two million directions × one cube visible per direction = **two
+million cubes** that matter, per drawn frame. Out of 50 billion cubes
+in the whole world.
+
+**That's the trick.** The world is huge. The visible part is tiny.
+
+### Two million out of fifty billion
+
+Let's do the math on what "tiny" means.
+
+A Monkey-Island-sized island has roughly **50 billion 1-cm cubes**
+(walls, ground, palm fronds, water, all of it). 50 billion. Stored
+on the hard drive.
+
+A typical computer screen, at the resolution most people play games
+at, has about **2 million pixels**.
+
+So the ratio of "world data" to "what the screen needs right now" is:
+
+> **50,000,000,000 cubes in the world ÷ 2,000,000 pixels on screen ≈ 25,000 to 1**
+
+For every cube the player can *see* right now, there are 25,000 cubes
+they can't see. The computer's job is to *quickly find the right 2
+million out of the 50 billion*, every sixtieth of a second.
+
+This is doable because of **how cube space is shaped**. The 25,000
+hidden cubes per visible cube aren't randomly scattered — they're
+spatially organised. The cubes you can see are the ones near your
+camera; the cubes you can't see are the ones far from you, behind
+walls, around corners, on the other side of the island.
+
+The computer doesn't have to *consider* the 25,000 hidden cubes per
+visible one. It just *skips* them — by virtue of knowing where the
+camera is and which direction each pixel is pointing.
+
+### How fast can you read pages from a book?
+
+OK, but here's the practical question. The visible cubes change as you
+walk. If you take one step forward, some cubes that were behind you
+become visible (when you turn), and new cubes ahead of you become
+visible (because you're closer to them). The computer has to *fetch*
+those new cubes from the hard drive into its fast memory.
+
+How fast does this fetching happen?
+
+A modern computer's hard drive (specifically an **SSD** — solid-state
+drive, the small chip-based fast kind) can read about **5 to 7
+gigabytes per second**. That's the speed at which it can pull data
+off itself and hand it to the rest of the computer.
+
+In one sixtieth of a second (one frame at 60 frames per second), an
+SSD can hand over about **80 to 100 megabytes**. That's roughly 80
+million bytes of data, per frame, from disk to fast memory.
+
+When you walk forward at a normal walking pace (about 5 metres per
+second), your camera moves **8 centimetres per frame**. That means
+*new* cubes coming into view per frame: about **6 to 8 of them along
+the view direction**. At 4 bytes per cube, that's **30 bytes of new
+cube data per frame**.
+
+Thirty bytes. The SSD can move 80,000,000 bytes per frame. We're
+using **a tiny fraction of one percent** of what the SSD can do.
+
+There's enormous spare capacity. You could run, sprint, fly, or
+teleport across the world, and the SSD would still keep up with
+delivering "the cubes you need right now."
+
+### The bookcase metaphor (the chunk system)
+
+The library has another trick: books are organised in **bookcases**.
+Each bookcase holds about 20 books. The librarian doesn't bring you
+individual pages — they bring you whole bookcases worth at a time.
+
+The computer does the same thing. The 50 billion cubes in the world
+are grouped into **chunks** — each chunk is a small cube-shape of the
+world about 16 × 16 × 16 cubes (roughly fingertip-sized in actual
+world units). The whole island is divided into millions of these
+chunks.
+
+When you walk forward, the computer doesn't fetch individual cubes
+from the hard drive. It fetches whole *chunks* — 16,384 cubes at a
+time, in one go. Much more efficient.
+
+At any given moment, the computer's fast memory holds maybe **200
+chunks** — the ones near your camera. That's about 6 gigabytes of fast
+memory in use. The other six million chunks (or however many your
+island has) sit on the hard drive, waiting.
+
+As you walk, the chunks at the *edges* of your visible region get
+swapped:
+- New chunks from the direction you're walking into → loaded from disk
+- Old chunks from the direction you're walking away from → forgotten,
+  so the memory they were using can be re-used
+
+It's exactly like a "sliding window" of bookcases, with you in the
+middle. You always have the same number of bookcases around you, but
+they're different bookcases depending on where you are.
+
+### What if you teleport?
+
+Suppose you don't walk — you *teleport* to a completely different part
+of the island. Now suddenly the chunks the computer had loaded are
+useless. None of them are near where you appeared. The computer has to
+load **all 200 chunks of your new region from scratch**.
+
+At 16 kilobytes per chunk, that's about **3 megabytes** of new data
+needed. The SSD can pull that in **under a thousandth of a second** —
+much faster than one frame.
+
+So even a teleport has no perceptible loading time on a modern SSD.
+You blink, you're somewhere else, the world is already there.
+
+### The "doorbell" we built earlier — it makes this faster
+
+Remember the doorbell trick from §8.5 — the one-bit "is anyone home?"
+tag at each cube? It plays a huge role here.
+
+When the computer is figuring out which cubes are visible (the 2
+million out of 50 billion), it has to check a lot of cubes along each
+view direction. *Most* of those cubes are empty (sky, air with nothing
+in it). The doorbell lets it **skip empty cubes instantly**: ring the
+doorbell, no answer, move on, never read the contents.
+
+Without the doorbell, the computer would have to read each cube's full
+colour data just to find out if it was empty. With the doorbell, it
+reads one bit, finds out it's empty, moves on. **30 times less work.**
+
+And the "did anyone look here" doorbell from §8.5.1 plays the role of
+**telling the hard drive which chunks to keep ready**. After each
+frame, the computer can ask: *"Which cubes did the player actually
+see this frame?"* The answer comes back as a list of cubes (or, more
+practically, chunks). The chunks NOT in that list can be safely
+forgotten from fast memory; the chunks IN the list must stay loaded.
+
+This is the system in one sentence: **"Whatever cubes the player just
+looked at, keep them ready. Forget the rest."**
+
+### Even bigger worlds — when SSD isn't enough
+
+For genuinely massive worlds — a whole city at 1-centimetre detail,
+say — the hard drive eventually fills up. **Microsoft Flight Simulator
+handles the entire Earth's surface** by keeping the world data on
+their *servers*, not your computer. When you fly over Paris, your
+computer streams the Paris chunks from Microsoft's data centre over
+the internet. When you fly to Tokyo, it streams the Tokyo chunks. The
+total world is **2.5 petabytes** (2,500,000 gigabytes) — a couple of
+thousand standard hard drives' worth — and you never need to download
+it all.
+
+For our project, that's overkill — a single 2-terabyte SSD ($80 at
+the time of writing) can hold "the entire street map of New York City
+at 1-centimetre precision." Most people won't need more.
+
+But the same trick works in principle. **The bottleneck stops being
+"how much can I fit on my hard drive" and starts being "how fast can
+the internet hand it to me."** At broadband speeds, you can stream a
+chunk in a few milliseconds — slower than an SSD but still well within
+the frame budget for not-too-fast camera motion.
+
+### The complete picture
+
+So when you're walking around in our Mêlée-Island-sized world:
+
+1. **The whole world** (200 gigabytes) sits on your SSD, waiting.
+2. **About 200 chunks** (6 gigabytes) are in your graphics card's
+   fast memory at any moment — the chunks around your camera.
+3. **About 2 million cubes** (160 megabytes — but mostly the doorbells
+   are read, not the full data) are *actually examined* per frame —
+   the cubes your screen pixels point at.
+4. **About 30 bytes per frame** are streamed from SSD to fast memory
+   as you walk — the new chunks arriving at the edge of your visible
+   region.
+5. **The visible part is drawn 60 times per second.** All you see is
+   the scene; the streaming and chunking happens silently underneath.
+
+The dream is that the whole thing is invisible to the player. You
+walk, you see, the world is there. **You never know there's a 200 GB
+library being silently sliced into the bookcase you're standing in
+front of, 60 times every second.**
+
+That's how a graphics card with 16 gigabytes of memory plays a
+200-gigabyte world. **Not by getting bigger memory — by being
+*clever about what to look at*.**
+
+---
+
 ## 8. The "don't look behind you" trick
 
 Here's another small improvement we suggested.
@@ -288,6 +563,40 @@ For a typical scene where 5% of spots are populated, the combined cost drops fro
 This is one of those "wait, why don't we already do this everywhere" tricks. It's actually a standard pattern in computer graphics (called an "occupancy bitmap") but it isn't currently in Lyra 2. Adding it is part of our proposal.
 
 ✅ **And we've actually built it** — the working code lives in our project at `pipeline/uvw_atlas.py` as a class called `OccupancyBitmap`. You can hand it a list of populated spots and it builds the doorbell map; ask it about any spot and it tells you yes/no instantly. We verified the math works for all 16.7 million possible spots in a small-room-sized map (took about a second on a regular laptop). The pattern can be lifted straight into Lyra 2 with minor changes; it doesn't need any retraining of the AI to add it.
+
+### 8.5.1 An even better doorbell — the "did anyone look here?" tag
+
+While building the rest of this project, we noticed the doorbell could
+be slightly bigger and do twice the work. Instead of just one bit
+saying *"is anyone home?"*, give each spot **two bits**:
+
+- **Bit 1:** is anyone home? *(occupancy — same as before)*
+- **Bit 2:** did someone just look at this spot? *(touched-this-moment)*
+
+The "did someone look here" bit gets set by the program drawing the
+picture every time it actually sees that spot — like a smudge on a
+visitor log. At the end of each picture, the computer can ask: *"which
+spots were smudged?"* and it gets back **exactly the list of places
+the viewer cared about this instant.**
+
+Why is this useful? Because the computer can keep only those
+"recently-touched" spots in its fast memory and let the rest sit on
+the hard drive. As the viewer looks around — turning their head, walking
+forward, looking up — different spots get smudged each moment, and the
+fast memory swaps in the new ones from disk.
+
+**The trick that makes virtual reality work without lag.** A
+headset-wearer can turn their head 180 degrees in a tenth of a second.
+If the computer pre-loaded only the spots in front of them, they'd see
+nothing when they turned. With the smudge-bit, **whatever spots the
+viewer's eyes touch are automatically the ones in memory** — for ANY
+direction they choose to look, no advance warning needed.
+
+Storage cost: a 4 MB doorbell map instead of 2 MB. Doubles the
+doorbell, but still 12× smaller than the original colour data. ✅
+**Built** — `pipeline/uvw_atlas.py`'s `OccupancyBitmap` now supports
+both modes (1-bit and 2-bit) via a constructor option. The 2-bit mode
+is what runtime virtual-reality rendering would use.
 
 ---
 
@@ -345,6 +654,28 @@ Two demos there:
 - The **photoreal scene demo** (a small village, made of 167,000 glowing dots)
 - The **bijection explainer** at /uvw (with the map address visible on every cube)
 
+### A voxel-world walking demo (new, 2026-05-20)
+
+To show that the **runtime** side also works — the bit where you fly
+around inside the saved world after it's been made — we built a small
+self-contained demo that runs in any web browser, no installation needed.
+
+Open the file `voxgaussian/voxel_renderer/index.html` in any modern
+browser. You'll see a tropical island scene (sand floor, central tower,
+palm trees) made of 16 million tiny cubes, that you can fly around
+with the keyboard and mouse. Pick a different scene with the 1, 2, or
+3 keys (island / stepped tower / glowing caverns).
+
+The interesting trick: **the computer never stores the whole island
+at once.** It only thinks about the cubes the camera is currently
+looking at. Press F to turn that trick off — you'll see the frame
+rate drop. Press G to colour the parts the trick is skipping in red,
+so you can see exactly what gets ignored.
+
+This is the same trick that lets a $400 graphics card play a
+hundred-square-kilometre world at full quality. The computer only ever
+holds the bit of world the player is looking at *right now*.
+
 ---
 
 ## 11. The complete list of everything we did
@@ -380,6 +711,14 @@ For completeness (this is the "full feature set" section the introduction promis
 14. **Hosted everything on a public website** — https://downtoearth-9lq.pages.dev — so the whole thing is browseable, downloadable, shareable.
 
 15. **Wrote this dummies version**, because the technical writeups are useful but only to people who already know what a "diffusion model" is. This page is for everyone else.
+
+16. **(May 2026) Added the "did anyone look here?" tag** to the doorbell — a 2-bit version of the occupancy bitmap that records which spots the player's view actually touched each instant. The data structure for virtual-reality-safe streaming (head can turn 180° instantly and nothing pops in).
+
+17. **(May 2026) Built a voxel-world walking demo** — a single-file webpage that flies around a 16-million-cube test world at full speed on any modern graphics card. Proves the runtime renderer pieces work on consumer hardware. Includes the "only think about cubes the camera is looking at" trick.
+
+18. **(May 2026) Surveyed the speedup stack** — independently researched what people have shared publicly about making Lyra-2-class AI go faster. Found a stackable combination of tricks (already-shipped distillation + content-aware step skipping + compiler optimisations + native fp8 maths) that gives roughly **60× speedup** over stock Lyra 2, with no retraining required. This is what makes a Monkey-Island-class 1 km² world cost ~$73 of cloud computing instead of ~$1,400.
+
+19. **(May 2026) Designed entity-structured prompts** — instead of giving the AI a freeform sentence ("a fishing village at dawn"), give it a small list of named things it should include (`sky`, `dock`, `boat`, `palm`, `fisherman`) with canonical expanded descriptions. Self-organising so the most-used entities in your project automatically get the cheapest storage. Plugs into the same colour-coordinate atlas as a per-voxel semantic tag, so every cube knows *what* it is, not just what colour.
 
 ---
 

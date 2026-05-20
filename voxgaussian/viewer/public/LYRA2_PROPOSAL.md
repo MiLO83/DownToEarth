@@ -492,6 +492,96 @@ under Apache-2.0 compatibility.
 
 ---
 
+## Future architectural directions
+
+The proposal above is grounded in what we can demonstrate today against Lyra 2's current architecture. This section captures two forward-looking architectural ideas that emerged from our design conversations and that we think are worth recording on the public record — not because they're in the patch (they aren't), but because they're a natural continuation of the UVW-conditioning thread and may inform Lyra 3 / sibling-model design.
+
+These are intuitions, not validated results. We can't run the experiments. We're recording them publicly now so that (a) the ideas have a timestamp and provenance, (b) anyone considering similar architectures has prior context, and (c) the team can engage if any of these are interesting enough to discuss.
+
+### A. Two-pass structure-then-channels diffusion
+
+Standard diffusion (DDPM, EDM, Wan 2.1, Lyra 2) uses a single denoiser network that handles all noise levels via timestep conditioning. The network implicitly learns to solve gross structure at high noise levels and fine pixel detail at low noise levels — but the architectural separation is implicit, every parameter is involved in every step.
+
+**The proposal:** make this explicit by splitting diffusion into two architectural stages:
+
+1. **Structure pass (few large-noise steps):** A specialised denoiser that consumes ONLY the world-coord canonical channel (the UVW bijection from §4.1: 3 bytes per pixel encoding voxel position). It outputs a coord map: "wall at (50, 70, 40), sky at (0, 200, 0)." No RGB. Roughly 4 noise steps.
+
+2. **Channel pass (few small-noise steps):** A second, smaller denoiser that takes the locked coord map as conditioning and resolves RGB / lighting per pixel. Because the structure is fixed, the conditional distribution over RGB given UVW is much narrower than the unconditional distribution — the second-stage problem is dramatically easier. Roughly 2-4 noise steps.
+
+**Adjacent literature:** the closest published expression is **eDiff-I** (NVIDIA Research, 2022) which uses expert denoisers per noise range. This proposal differs by splitting on *representational role* (UVW position vs RGB channels) rather than noise magnitude. Cascaded Diffusion (Imagen) does a related thing across resolution stages.
+
+**Why it pairs with our UVW work:** the structure pass operates *directly* on the world-coord canonical channel. The bijection from §3 becomes the central data type, not a retrofitted side channel. The model is architecturally UVW-native rather than UVW-adapted.
+
+**Estimated compute saving:** stage 1 has 1-3 channels of input vs Lyra 2's RGB+conditioning stack, smaller model viable (~500M params would likely suffice for the structure pass). Stage 2 is colourisation-given-structure, also smaller (~200M params). Total inference cost potentially **3-5× lower than monolithic 14B Lyra 2** at similar quality.
+
+**Open question:** does training the two stages independently and composing them at inference time match the quality of jointly training one large model? eDiff-I's results suggest yes within reason; the answer for video diffusion is unverified.
+
+### B. Progressive bit-depth ladder with bounded refinement
+
+A finer-grained generalisation of A: instead of one monolithic diffusion that decides everything at full RGB precision, decompose into a *ladder* of stages each operating at a higher bit-depth than the last, with each stage bounded to small deviations from the previous stage's output.
+
+**The proposal:**
+
+| Stage | What it generates | Per-pixel search space | Allowed deviation from previous |
+|---|---|---|---|
+| **1** | 256-level posterised image (dark→light spectrum, 8-bit) | 256 values | free |
+| **2** | Add detail; each pixel ±5 levels of stage-1 output | 11 deltas | ±5 |
+| **3** | Tighten; ±2 deltas | 5 deltas | ±2 |
+| **4** | Tighten; ±1 deltas | 3 deltas | ±1 |
+| **5** | Stabilise to full RGB (8-bit channel = 16.7M, or 16-bit channel = 65k³) | full | locked |
+
+**Reverse-posterising as generation.** Stage 1 generates a heavily-posterised version (large search space at first because the picture is "free"); subsequent stages progressively un-posterise it with bounded steps. The whole image converges from blocky "paint by numbers" toward full color depth.
+
+**Three properties that make this potentially better than monolithic diffusion:**
+
+1. **Tiny per-stage search spaces.** Stage 2 picks between 11 deltas per pixel. Stage 4 picks between 3 deltas per pixel. Compared to monolithic RGB diffusion's continuous 24-bit-per-pixel search, this is astronomically smaller.
+2. **No structural drift between stages.** The ±N bound means the model literally cannot decide a wall is sky in stage 4 — structure locks in stage 1, later stages can only refine. This eliminates the "model loses its mind on long sampling chains" failure mode.
+3. **Model size can shrink per stage.** Stage 1 has to solve composition + lighting + structure — needs a medium model. Stages 2-4 are local refinement — tiny models suffice. Stage 5 is colourisation-given-luminance — also small.
+
+**Estimated compute saving:** each step is much cheaper than a monolithic-RGB step due to the smaller search space. Total step count: maybe **10-18 across all 5 stages** vs **35 monolithic DDPM steps** or **4 DMD-distilled steps**. End-to-end potentially **2-5× faster than a 35-step monolithic** at similar quality, with the bonus of bounded structural drift.
+
+**Adjacent literature:**
+- **Bit-plane coding** (JPEG2000 family) does progressive bit-depth refinement for *compression*, not generation
+- **Cascaded Diffusion** (Imagen) cascades by *resolution*, not bit depth
+- **SDEdit / bounded-noise diffusion** does a *single* bounded refinement, not a ladder of progressively-tightening ones
+- **Wavelet diffusion** decomposes by frequency
+
+To our knowledge, **the specific combination of (a) explicit progressive bit-depth ladder + (b) shrinking ± constraints between stages + (c) applied to generative diffusion is not in published literature** as of mid-2026. Pointers welcome if we missed something.
+
+**Open question:** can a single trained model handle multiple stages of the ladder with timestep conditioning, or are separate models per stage required? The bounded-deviation property suggests separate small models per stage would specialise well and stay small.
+
+### C. How A and B compose with each other and with the UVW work
+
+The two future directions combine cleanly with the world-coord canonical encoding from §4.1 to form a four-axis decomposition that may be the architecture of a fully UVW-native sibling model:
+
+| Axis | What it solves | Representation | Diffusion stages |
+|---|---|---|---|
+| **Position** (§4.1) | Where pixels live in 3D | UVW canonical channel (24-32 bit/pixel) | ~4 large-noise steps |
+| **Luminance** (B, stage 1) | How light each pixel is | 8-bit posterised | ~4 medium-noise steps |
+| **Bit-depth refinement** (B, stages 2-4) | Texture detail given structure+luminance | ±5/±2/±1 deltas | 5-10 small-noise steps |
+| **Chroma** (B, stage 5) | Final colour given everything above | full 16.7M or 65k³ RGB | 1-2 stabilisation steps |
+
+Each axis is structurally smaller than the combined RGB problem. Each can be trained / distilled independently. The total compute may be substantially less than one monolithic diffusion model that does everything at once.
+
+For Lyra 2 specifically: the existing pipeline (`Sparse3DCache` → `_build_canonical_spatial_coords` → DiT → VAE-decode → 3DGS lifter) could be reorganised around this decomposition by training a sibling model that's structurally UVW-then-luma-then-RGB, rather than the current monolithic "predict RGB from coord + reference latent."
+
+### What we're NOT claiming
+
+These are forward-looking notes, not measured results. Specifically we are NOT claiming:
+
+- That any of these architectures would match Lyra 2's documented quality
+- That the compute savings estimates above are accurate (they're back-of-envelope)
+- That the bounded-deviation refinement actually trains stably in practice (it's an open empirical question)
+- That this is a better path than Lyra 2's existing approach for the goal Lyra 2 was designed for
+
+What we ARE claiming: these are coherent architectural ideas, novel in their specific combination, that emerge naturally from the UVW-bijection work and that we think are worth recording publicly in case they're useful to the team or the broader community. We claim the ideas, not the validation.
+
+### Provenance
+
+Both ideas surfaced in design conversations between MiLO and Opie during the development of PR #61, 2026-05-19 and 2026-05-20. We're recording them here so the timestamp is on the public record. If either turns out to be a productive research direction — by NVIDIA or otherwise — we'd appreciate a citation; if either is already a published paper we've missed, we'd appreciate the pointer so we can credit appropriately.
+
+---
+
 ## What this doesn't claim
 
 - **Quality wins.** I don't have the compute to retrain Lyra 2 and

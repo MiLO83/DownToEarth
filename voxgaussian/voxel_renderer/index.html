@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>UVW Voxel Raymarcher — Lyra 2 Lite preview</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; color: #ccc;
+               font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #hud {
+    position: fixed; top: 8px; left: 8px;
+    background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 4px;
+    font-size: 12px; line-height: 1.4; pointer-events: none;
+    border: 1px solid #333;
+  }
+  #hud b { color: #6cf; }
+  #help {
+    position: fixed; bottom: 8px; left: 8px;
+    background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 4px;
+    font-size: 11px; line-height: 1.5;
+    border: 1px solid #333;
+  }
+  #help kbd { background: #222; padding: 1px 5px; border-radius: 3px;
+              border: 1px solid #444; font-family: inherit; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud">
+  <b>UVW Voxel Raymarcher</b><br>
+  scene  : <span id="s_scene">procedural-island</span><br>
+  voxels : <span id="s_vox">256³ (16.7M addresses)</span><br>
+  res    : <span id="s_res">—</span><br>
+  fps    : <span id="s_fps">—</span><br>
+  ray ms : <span id="s_ms">—</span><br>
+  cam    : <span id="s_cam">—</span><br>
+  chunks : <span id="s_chunks">—</span>  <span style="color:#888">visible / total</span><br>
+  culled : <span id="s_cull">—</span>  <span style="color:#888">avoided voxel work</span>
+</div>
+<div id="help">
+  <kbd>L-drag</kbd> orbit · <kbd>R-drag</kbd> pan · <kbd>wheel</kbd> zoom · <kbd>WASD</kbd> fly · <kbd>Q/E</kbd> up/down<br>
+  <kbd>1-3</kbd> scene · <kbd>F</kbd> toggle frustum-cull · <kbd>G</kbd> show culled chunks as red
+</div>
+
+<!-- =================================================================== -->
+<!-- VERTEX SHADER : a full-screen triangle (no geometry, no VBOs needed) -->
+<!-- =================================================================== -->
+<script id="vert" type="x-shader/x-vertex">#version 300 es
+out vec2 vUV;
+void main() {
+  // Three vertices that cover the full viewport in one triangle.
+  vec2 pos = vec2((gl_VertexID == 1) ? 3.0 : -1.0,
+                  (gl_VertexID == 2) ? 3.0 : -1.0);
+  vUV = (pos + 1.0) * 0.5;
+  gl_Position = vec4(pos, 0.0, 1.0);
+}
+</script>
+
+<!-- =================================================================== -->
+<!-- FRAGMENT SHADER : UVW voxel raymarcher                               -->
+<!-- =================================================================== -->
+<script id="frag" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+precision highp int;
+
+in vec2 vUV;
+out vec4 outColor;
+
+uniform vec2  uResolution;
+uniform vec3  uCameraPos;     // in voxel-space units (0..GRID)
+uniform vec3  uCameraDir;     // unit
+uniform vec3  uCameraRight;   // unit
+uniform vec3  uCameraUp;      // unit
+uniform float uFovTan;        // tan(fov/2)
+uniform int   uScene;         // which procedural scene
+uniform float uTime;
+
+// Frustum-cull state. Each chunk is CHUNK_SIZE^3 voxels.
+// GRID/CHUNK_SIZE = 16, so 16^3 = 4096 chunks. Visibility is a bitset
+// uploaded as a uniform array of ints.
+uniform int   uFrustumOn;             // 0/1
+uniform int   uShowCulled;            // 0/1 paints culled chunks red
+uniform int   uChunkVis[128];         // 128 ints * 32 bits = 4096 chunk slots
+
+const int   GRID       = 256;
+const float GRID_F     = 256.0;
+const int   CHUNK_SIZE = 16;
+const int   CHUNK_DIM  = 16;          // GRID / CHUNK_SIZE
+const int   MAX_STEPS  = 384;
+
+// Returns 1 if chunk (cx, cy, cz) is visible (or culling off).
+int chunkVisible(ivec3 ci) {
+  if (uFrustumOn == 0) return 1;
+  if (any(lessThan(ci, ivec3(0))) || any(greaterThanEqual(ci, ivec3(CHUNK_DIM)))) {
+    return 0;
+  }
+  int idx = ci.x + ci.y * CHUNK_DIM + ci.z * CHUNK_DIM * CHUNK_DIM;
+  int word = idx >> 5;        // / 32
+  int bit  = idx & 31;        // % 32
+  return (uChunkVis[word] >> bit) & 1;
+}
+
+// -----------------------------------------------------------------------
+// Procedural voxel sampler. Returns RGBA where alpha = occupancy (0 or 1).
+// In production, this is replaced by texture(atlas, voxelPos / GRID_F).
+// For the demo, we synthesise three scenes from pure math so the renderer
+// is independently testable without a data file.
+// -----------------------------------------------------------------------
+
+// 3D hash for pseudo-random patterns
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+vec3 hash33(vec3 p) {
+  p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+           dot(p, vec3(269.5, 183.3, 246.1)),
+           dot(p, vec3(113.5, 271.9, 124.6)));
+  return fract(sin(p) * 43758.5453);
+}
+
+vec4 sampleScene_island(ivec3 v) {
+  // Procedural island scene:
+  //   sand floor at y < 40
+  //   ocean ring at edges (y < 48 and far from center)
+  //   sky elsewhere (transparent)
+  //   palms scattered + one central tower
+  vec3 p = vec3(v);
+  vec3 c = vec3(128.0, 0.0, 128.0);
+  float d_center = length(p.xz - c.xz);
+
+  // Sea floor + waterline
+  if (v.y < 40) {
+    // Sand near center, sea floor at edges
+    if (d_center < 110.0) {
+      vec3 col = vec3(0.85, 0.78, 0.55) + hash33(floor(p * 0.3)) * 0.08;
+      return vec4(col, 1.0);
+    } else {
+      return vec4(0.12, 0.18, 0.25, 1.0);  // dark sea floor
+    }
+  }
+  // Water layer
+  if (v.y >= 40 && v.y < 45 && d_center > 100.0) {
+    vec3 col = vec3(0.15, 0.45, 0.70) + hash33(floor(p * vec3(0.2, 0.5, 0.2))) * 0.07;
+    return vec4(col, 1.0);
+  }
+  // Beach band
+  if (v.y >= 40 && v.y < 44 && d_center > 95.0 && d_center < 108.0) {
+    return vec4(0.90, 0.82, 0.62, 1.0);
+  }
+
+  // Central tower (cylinder)
+  float d_tower = length(p.xz - vec2(128.0, 128.0));
+  if (d_tower < 8.0 && v.y >= 40 && v.y < 110) {
+    float band = mod(float(v.y - 40) * 0.15, 1.0);
+    vec3 col = mix(vec3(0.62, 0.52, 0.40), vec3(0.78, 0.66, 0.50), band);
+    return vec4(col, 1.0);
+  }
+  if (d_tower < 12.0 && v.y >= 108 && v.y < 116) {
+    return vec4(0.45, 0.20, 0.18, 1.0);  // tower top
+  }
+
+  // Palm trees: 8 around the island
+  for (int i = 0; i < 8; i++) {
+    float a = float(i) * 0.7853;  // pi/4
+    vec2 tp = vec2(128.0, 128.0) + vec2(cos(a), sin(a)) * 70.0;
+    float dt = length(p.xz - tp);
+    // Trunk
+    if (dt < 1.8 && v.y >= 40 && v.y < 70) {
+      return vec4(0.40, 0.28, 0.18, 1.0);
+    }
+    // Fronds (rough sphere)
+    vec3 frondCenter = vec3(tp.x, 72.0, tp.y);
+    if (length(p - frondCenter) < 7.0
+        && hash13(floor(p * 0.5)) > 0.35) {
+      return vec4(0.20, 0.55, 0.25, 1.0);
+    }
+  }
+
+  // Scattered rocks
+  for (int i = 0; i < 12; i++) {
+    vec2 rp = vec2(128.0, 128.0) +
+              (hash33(vec3(float(i), 0.0, 1.0)).xz - 0.5) * 160.0;
+    if (length(p.xz - rp) < 3.5 && v.y >= 40 && v.y < 45) {
+      return vec4(0.45, 0.42, 0.38, 1.0);
+    }
+  }
+
+  return vec4(0.0);  // air
+}
+
+vec4 sampleScene_tower(ivec3 v) {
+  // A tall stepped tower in the middle, sky elsewhere
+  if (v.y < 8) {
+    return vec4(0.30, 0.30, 0.35, 1.0);
+  }
+  vec3 p = vec3(v);
+  float r = 80.0 - float(v.y) * 0.25;  // tapered
+  float d = length(p.xz - vec2(128.0, 128.0));
+  if (d < r && v.y < 240) {
+    int band = v.y / 16;
+    vec3 col = vec3(0.6 + 0.05*float(band % 3),
+                    0.55 + 0.08*float(band % 4),
+                    0.5);
+    return vec4(col, 1.0);
+  }
+  return vec4(0.0);
+}
+
+vec4 sampleScene_caverns(ivec3 v) {
+  // Procedural cavern via 3D hash threshold
+  vec3 p = vec3(v) * 0.04;
+  float n = hash13(floor(p)) * 0.5
+          + hash13(floor(p * 2.0)) * 0.3
+          + hash13(floor(p * 4.0)) * 0.2;
+  // Solid mass with cavities
+  if (n > 0.52) {
+    float depth = float(v.y) / GRID_F;
+    vec3 base = mix(vec3(0.6, 0.4, 0.3), vec3(0.3, 0.45, 0.55), depth);
+    return vec4(base + hash33(vec3(v)) * 0.1, 1.0);
+  }
+  // Glow crystals in deep cavities
+  if (n < 0.48 && hash13(floor(vec3(v) * 0.3)) > 0.992) {
+    return vec4(0.4, 0.9, 1.0, 1.0);
+  }
+  return vec4(0.0);
+}
+
+vec4 sampleVoxel(ivec3 v) {
+  if (any(lessThan(v, ivec3(0))) || any(greaterThanEqual(v, ivec3(GRID)))) {
+    return vec4(0.0);
+  }
+  if (uScene == 1) return sampleScene_tower(v);
+  if (uScene == 2) return sampleScene_caverns(v);
+  return sampleScene_island(v);
+}
+
+// -----------------------------------------------------------------------
+// DDA voxel traversal (Amanatides & Woo, 1987)
+// Steps through one voxel at a time, exactly hitting each occupied cell.
+// -----------------------------------------------------------------------
+vec4 raymarch(vec3 ro, vec3 rd) {
+  ivec3 v = ivec3(floor(ro));
+  vec3  step = sign(rd);
+  // Avoid div-by-zero on axis-aligned rays
+  vec3  rdInv = 1.0 / max(abs(rd), vec3(1e-6));
+  vec3  tMax = (vec3(v) + max(step, 0.0) - ro) * rdInv;
+  tMax = abs(tMax);  // (signed dist along ray) * abs(rdInv)
+  vec3  tDelta = rdInv;
+
+  for (int i = 0; i < MAX_STEPS; i++) {
+    // Chunk-level frustum cull: if this voxel's chunk is outside the
+    // frustum, skip it (treat as empty). Optionally paint red instead
+    // to visualise what got culled.
+    ivec3 chunk = v / CHUNK_SIZE;
+    int vis = chunkVisible(chunk);
+    vec4 voxel;
+    if (vis == 0) {
+      if (uShowCulled == 1) {
+        // Solid red where chunks were culled (debug viz)
+        voxel = vec4(0.6, 0.1, 0.1, 1.0);
+      } else {
+        voxel = vec4(0.0);  // empty
+      }
+    } else {
+      voxel = sampleVoxel(v);
+    }
+    if (voxel.a > 0.5) {
+      // Simple shading: lambertian against a fixed sun
+      vec3 sun = normalize(vec3(0.5, 0.8, 0.3));
+      // Surface normal = which face we entered through
+      vec3 normal;
+      if (tMax.x < tMax.y && tMax.x < tMax.z) {
+        normal = vec3(-step.x, 0.0, 0.0);
+      } else if (tMax.y < tMax.z) {
+        normal = vec3(0.0, -step.y, 0.0);
+      } else {
+        normal = vec3(0.0, 0.0, -step.z);
+      }
+      float diff = max(dot(normal, sun), 0.0);
+      float ambient = 0.35;
+      vec3 lit = voxel.rgb * (ambient + diff * 0.65);
+      // Distance fog
+      float dist = min(tMax.x, min(tMax.y, tMax.z));
+      float fog = 1.0 - exp(-dist * 0.005);
+      vec3 fogColor = vec3(0.60, 0.75, 0.90);
+      return vec4(mix(lit, fogColor, fog), 1.0);
+    }
+    // Advance to next voxel along whichever axis is closest
+    if (tMax.x < tMax.y) {
+      if (tMax.x < tMax.z) {
+        v.x += int(step.x); tMax.x += tDelta.x;
+      } else {
+        v.z += int(step.z); tMax.z += tDelta.z;
+      }
+    } else {
+      if (tMax.y < tMax.z) {
+        v.y += int(step.y); tMax.y += tDelta.y;
+      } else {
+        v.z += int(step.z); tMax.z += tDelta.z;
+      }
+    }
+  }
+  // Ray escaped — sky gradient
+  float h = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+  vec3 sky = mix(vec3(0.68, 0.78, 0.88), vec3(0.30, 0.55, 0.85), h);
+  return vec4(sky, 1.0);
+}
+
+void main() {
+  // NDC to camera ray
+  vec2 ndc = (vUV * 2.0 - 1.0);
+  ndc.x *= uResolution.x / uResolution.y;  // aspect
+  vec3 rd = normalize(uCameraDir
+                      + uCameraRight * ndc.x * uFovTan
+                      + uCameraUp    * ndc.y * uFovTan);
+  outColor = raymarch(uCameraPos, rd);
+}
+</script>
+
+<script>
+// ====================================================================
+// JS host: WebGL2 setup, camera control, render loop, HUD
+// ====================================================================
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
+if (!gl) {
+  document.body.innerHTML = "<p style='color:white;padding:2em'>WebGL2 not available.</p>";
+  throw new Error("WebGL2 required");
+}
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src.trim());
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(sh));
+    throw new Error("shader compile failed");
+  }
+  return sh;
+}
+
+const vsSrc = document.getElementById("vert").textContent;
+const fsSrc = document.getElementById("frag").textContent;
+const vs = compile(gl.VERTEX_SHADER, vsSrc);
+const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(prog));
+  throw new Error("program link failed");
+}
+gl.useProgram(prog);
+
+const u = {
+  resolution:  gl.getUniformLocation(prog, "uResolution"),
+  cameraPos:   gl.getUniformLocation(prog, "uCameraPos"),
+  cameraDir:   gl.getUniformLocation(prog, "uCameraDir"),
+  cameraRight: gl.getUniformLocation(prog, "uCameraRight"),
+  cameraUp:    gl.getUniformLocation(prog, "uCameraUp"),
+  fovTan:      gl.getUniformLocation(prog, "uFovTan"),
+  scene:       gl.getUniformLocation(prog, "uScene"),
+  time:        gl.getUniformLocation(prog, "uTime"),
+  frustumOn:   gl.getUniformLocation(prog, "uFrustumOn"),
+  showCulled:  gl.getUniformLocation(prog, "uShowCulled"),
+  chunkVis:    gl.getUniformLocation(prog, "uChunkVis"),
+};
+
+// ----- frustum-cull state -----------------------------------------
+const CHUNK_SIZE = 16;
+const CHUNK_DIM  = 16;                    // 256 / 16
+const N_CHUNKS   = CHUNK_DIM * CHUNK_DIM * CHUNK_DIM;   // 4096
+const visWords   = new Int32Array(128);   // 4096 bits / 32 = 128 ints
+let frustumOn    = 1;                     // F to toggle
+let showCulled   = 0;                     // G to toggle
+let visibleCount = 0;
+
+// A bare VAO so we can call gl.drawArrays with no buffers.
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+// -------------------- camera ----------------------------------------
+const cam = {
+  // start outside the 256³ grid looking inward
+  pos: [400, 220, 400],
+  yaw: -2.356,   // -135 degrees, looking toward origin
+  pitch: -0.35,
+  fov: Math.PI / 3,  // 60 degrees
+  speed: 80,         // voxels per second
+};
+
+function camAxes() {
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const dir = [cy * cp, sp, sy * cp];
+  // Right vector = cross(dir, world_up)
+  const right = [-sy, 0, cy];
+  // Up = cross(right, dir)
+  const up = [right[1]*dir[2] - right[2]*dir[1],
+              right[2]*dir[0] - right[0]*dir[2],
+              right[0]*dir[1] - right[1]*dir[0]];
+  return { dir, right, up };
+}
+
+// -------------------- input -----------------------------------------
+const keys = {};
+window.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "Digit1") scene = 0;
+  if (e.code === "Digit2") scene = 1;
+  if (e.code === "Digit3") scene = 2;
+  if (e.code === "KeyF") frustumOn  = 1 - frustumOn;
+  if (e.code === "KeyG") showCulled = 1 - showCulled;
+  document.getElementById("s_scene").textContent =
+      ["procedural-island", "stepped-tower", "caverns"][scene];
+});
+window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+let dragging = false;
+let lastX = 0, lastY = 0;
+canvas.addEventListener("mousedown", e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener("mouseup", () => { dragging = false; });
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  cam.yaw   += dx * 0.005;
+  cam.pitch -= dy * 0.005;
+  cam.pitch = Math.max(-Math.PI/2 + 0.05, Math.min(Math.PI/2 - 0.05, cam.pitch));
+});
+canvas.addEventListener("wheel", e => {
+  // Zoom by moving camera along view dir
+  const { dir } = camAxes();
+  const k = e.deltaY * 0.1;
+  cam.pos[0] -= dir[0] * k;
+  cam.pos[1] -= dir[1] * k;
+  cam.pos[2] -= dir[2] * k;
+  e.preventDefault();
+}, { passive: false });
+
+// -------------------- resize ----------------------------------------
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // Render at half resolution for speed; canvas displays scaled up
+  const scale = 0.5;
+  canvas.width  = Math.floor(window.innerWidth  * dpr * scale);
+  canvas.height = Math.floor(window.innerHeight * dpr * scale);
+  canvas.style.width  = window.innerWidth  + "px";
+  canvas.style.height = window.innerHeight + "px";
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  document.getElementById("s_res").textContent = `${canvas.width}x${canvas.height}`;
+}
+window.addEventListener("resize", resize);
+resize();
+
+// -------------------- frustum cull ----------------------------------
+// Extract the 6 frustum planes from camera state and test each chunk's
+// AABB against them. Visible chunks get their bit set in visWords.
+//
+// Plane representation: (nx, ny, nz, d) where n . p + d > 0 = inside.
+// For an AABB-vs-plane test we use the "p-vertex" (positive-most vertex
+// relative to plane normal) -- if the p-vertex is outside, the whole
+// AABB is outside.
+
+const aspect = () => canvas.width / canvas.height;
+
+function buildFrustumPlanes() {
+  const { dir, right, up } = camAxes();
+  const tanH = Math.tan(cam.fov * 0.5);
+  const tanV = tanH / aspect();   // careful: we used uFovTan with aspect baked into x
+  // Reconstruct field-of-view half-angles for each axis:
+  // horizontal half-angle = atan(tanH * aspect)
+  const tanX = tanH * aspect();
+  const tanY = tanH;
+  // Near = 0.5 (just past the camera), far = far enough to clear the world (300)
+  const near = 0.5, far = 600;
+
+  // Plane normals point INWARD.
+  // Near + far: along view dir.
+  const nNear = dir;
+  const nFar  = [-dir[0], -dir[1], -dir[2]];
+
+  // Side planes: combine view dir with right/up scaled by tan(fov)
+  // Left  plane normal:  dir + right * tanX  (then normalize)
+  // Right plane normal:  dir - right * tanX
+  // Bottom plane normal: dir + up    * tanY
+  // Top    plane normal: dir - up    * tanY
+  const norm = (v) => {
+    const m = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0]/m, v[1]/m, v[2]/m];
+  };
+  const nLeft   = norm([dir[0] + right[0]*tanX, dir[1] + right[1]*tanX, dir[2] + right[2]*tanX]);
+  const nRight  = norm([dir[0] - right[0]*tanX, dir[1] - right[1]*tanX, dir[2] - right[2]*tanX]);
+  const nBottom = norm([dir[0] + up[0]*tanY,    dir[1] + up[1]*tanY,    dir[2] + up[2]*tanY]);
+  const nTop    = norm([dir[0] - up[0]*tanY,    dir[1] - up[1]*tanY,    dir[2] - up[2]*tanY]);
+
+  // d for each plane: -dot(normal, pointOnPlane)
+  // For near/far, pointOnPlane = cam.pos + dir * near (or far)
+  const cp = cam.pos;
+  const dotV = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+  const planeFromPoint = (n, p) => [n[0], n[1], n[2], -dotV(n, p)];
+  return [
+    planeFromPoint(nNear,  [cp[0]+dir[0]*near, cp[1]+dir[1]*near, cp[2]+dir[2]*near]),
+    planeFromPoint(nFar,   [cp[0]+dir[0]*far,  cp[1]+dir[1]*far,  cp[2]+dir[2]*far]),
+    planeFromPoint(nLeft,  cp),
+    planeFromPoint(nRight, cp),
+    planeFromPoint(nBottom, cp),
+    planeFromPoint(nTop,    cp),
+  ];
+}
+
+function aabbOutside(planes, mn, mx) {
+  // p-vertex test for each plane. AABB outside iff some plane has it
+  // entirely on the negative side.
+  for (let i = 0; i < planes.length; i++) {
+    const p = planes[i];
+    const px = (p[0] > 0) ? mx[0] : mn[0];
+    const py = (p[1] > 0) ? mx[1] : mn[1];
+    const pz = (p[2] > 0) ? mx[2] : mn[2];
+    if (p[0]*px + p[1]*py + p[2]*pz + p[3] < 0) return true;
+  }
+  return false;
+}
+
+function updateChunkVisibility() {
+  visibleCount = 0;
+  visWords.fill(0);
+  if (!frustumOn) {
+    // All visible
+    for (let i = 0; i < N_CHUNKS; i++) {
+      visWords[i >> 5] |= (1 << (i & 31));
+    }
+    visibleCount = N_CHUNKS;
+    return;
+  }
+  const planes = buildFrustumPlanes();
+  const cs = CHUNK_SIZE;
+  for (let cz = 0; cz < CHUNK_DIM; cz++) {
+    for (let cy = 0; cy < CHUNK_DIM; cy++) {
+      for (let cx = 0; cx < CHUNK_DIM; cx++) {
+        const mn = [cx*cs, cy*cs, cz*cs];
+        const mx = [(cx+1)*cs, (cy+1)*cs, (cz+1)*cs];
+        if (!aabbOutside(planes, mn, mx)) {
+          const idx = cx + cy*CHUNK_DIM + cz*CHUNK_DIM*CHUNK_DIM;
+          visWords[idx >> 5] |= (1 << (idx & 31));
+          visibleCount++;
+        }
+      }
+    }
+  }
+}
+
+// -------------------- render loop -----------------------------------
+let scene = 0;
+let lastT = performance.now();
+let frames = 0;
+let fpsAccum = 0;
+let msAccum = 0;
+
+function frame(now) {
+  const dt = Math.min((now - lastT) / 1000, 0.1);
+  lastT = now;
+
+  // Movement
+  const { dir, right, up } = camAxes();
+  const v = cam.speed * dt;
+  function move(axis, k) {
+    cam.pos[0] += axis[0] * k;
+    cam.pos[1] += axis[1] * k;
+    cam.pos[2] += axis[2] * k;
+  }
+  if (keys["KeyW"]) move(dir,   v);
+  if (keys["KeyS"]) move(dir,  -v);
+  if (keys["KeyA"]) move(right,-v);
+  if (keys["KeyD"]) move(right, v);
+  if (keys["KeyQ"]) move([0,1,0], -v);
+  if (keys["KeyE"]) move([0,1,0],  v);
+
+  // Frustum cull: build visibility bitmap on JS side, upload to shader.
+  updateChunkVisibility();
+
+  // Render
+  const t0 = performance.now();
+  gl.uniform2f(u.resolution, canvas.width, canvas.height);
+  gl.uniform3f(u.cameraPos, cam.pos[0], cam.pos[1], cam.pos[2]);
+  gl.uniform3f(u.cameraDir, dir[0], dir[1], dir[2]);
+  gl.uniform3f(u.cameraRight, right[0], right[1], right[2]);
+  gl.uniform3f(u.cameraUp, up[0], up[1], up[2]);
+  gl.uniform1f(u.fovTan, Math.tan(cam.fov * 0.5));
+  gl.uniform1i(u.scene, scene);
+  gl.uniform1f(u.time, now / 1000);
+  gl.uniform1i(u.frustumOn, frustumOn);
+  gl.uniform1i(u.showCulled, showCulled);
+  gl.uniform1iv(u.chunkVis, visWords);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.flush();
+  const t1 = performance.now();
+
+  frames++;
+  fpsAccum += 1 / dt;
+  msAccum += (t1 - t0);
+  if (frames >= 30) {
+    document.getElementById("s_fps").textContent = (fpsAccum / frames).toFixed(1);
+    document.getElementById("s_ms").textContent  = (msAccum / frames).toFixed(2);
+    document.getElementById("s_cam").textContent =
+      `(${cam.pos[0].toFixed(0)}, ${cam.pos[1].toFixed(0)}, ${cam.pos[2].toFixed(0)})`;
+    const pct = (100 * visibleCount / N_CHUNKS).toFixed(1);
+    document.getElementById("s_chunks").textContent =
+      `${visibleCount} / ${N_CHUNKS}  (${pct}%)`;
+    document.getElementById("s_cull").textContent =
+      frustumOn ? `${(100 - parseFloat(pct)).toFixed(1)}% chunks skipped` : "off";
+    frames = 0; fpsAccum = 0; msAccum = 0;
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
