@@ -258,6 +258,37 @@ The fancy name for this is **"axis-aligned octant culling."** The plain version:
 
 ---
 
+## 8.5 A tiny bonus — the "doorbell" trick
+
+While we're here, one more small idea that sits nicely on top of everything else.
+
+Most of the spots in our map are **empty**. Think of a 3D map of a hamlet square — the spots that are actually a wall, a tree, a fountain, a cobblestone are a tiny fraction of the total volume of air around them. Most of the map is just "sky" or "air with nothing in it."
+
+When the computer wants to draw the scene, it walks through every spot asking *"is there anything here?"* For empty spots, it currently has to read **three bytes** (the colour information of that spot) just to find out the answer is "no, nothing here."
+
+What if there was a **doorbell** at each spot — a one-bit yes/no that says *"is anyone home?"* — before you bother to read the three bytes of contents? If the doorbell says no, you skip the spot entirely. If yes, then you read.
+
+The math is wild:
+
+| Spots in the map | Three-byte storage | One-bit doorbell | Doorbell is smaller by... |
+|---|---|---|---|
+| 16 million (a small room at 1cm) | 50 megabytes | 2 megabytes | **24 times** |
+| 1 billion (a village block) | 3.2 gigabytes | 134 megabytes | 24 times |
+| 8.6 billion (a city block) | 25.8 gigabytes | 1 gigabyte | 24 times |
+
+The doorbell is **24 times smaller** than the colour data for every size of map. Reading it is much faster, takes much less memory, and the computer's quick cache memory can hold tens of thousands of doorbells at once — instead of just hundreds of colour entries.
+
+And here's the elegant bit: for sparse scenes (where most spots are empty, which is *most* scenes), pairing the doorbell with **only-store-colour-for-actually-populated-spots** gets you the best of both worlds:
+
+- **The doorbell** (always there, very small) lets you ask "is anything here?" instantly for any spot
+- **The colour data** (only stored for spots that have something) takes only the memory you actually need
+
+For a typical scene where 5% of spots are populated, the combined cost drops from **50 megabytes** down to about **5 megabytes** — *and* the AI can still answer "what's at this exact spot?" instantly. About 10× smaller than the original layout, with no loss of capability.
+
+This is one of those "wait, why don't we already do this everywhere" tricks. It's actually a standard pattern in computer graphics (called an "occupancy bitmap") but it isn't currently in Lyra 2. Adding it is part of our proposal.
+
+---
+
 ## 9. So... did it actually work?
 
 This is the question, isn't it.

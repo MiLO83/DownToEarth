@@ -548,6 +548,58 @@ For Gaussian splats specifically (one Gaussian per voxel-slot), RGBA16 addresses
 </tr>
 </table>
 
+### Per-voxel occupancy bit (the early-skip optimisation)
+
+Independently of the byte-width family above, a **same-resolution
+1-bit-per-voxel companion texture** is a worthwhile add for any sparse
+scene. The bit answers one question — *"is this voxel populated?"* — and
+lets a shader skip the multi-byte main-atlas read for empty voxels entirely.
+
+| Grid resolution | Voxel count | RGBA8 atlas (4 B/voxel) | RGB-only (3 B/voxel) | **1-bit occupancy mask** | Mask vs 3-byte ratio |
+|---|---|---|---|---|---|
+| 64³ | 262 K | 1.0 MB | 786 KB | **33 KB** | **24× smaller** |
+| 128³ | 2.1 M | 8.4 MB | 6.3 MB | **262 KB** | 24× |
+| **256³** | **16.7 M** | **67 MB** | **50 MB** | **2.1 MB** | **24×** |
+| 512³ | 134 M | 537 MB | 403 MB | 16.8 MB | 24× |
+| 1024³ | 1.07 B | 4.3 GB | 3.2 GB | 134 MB | 24× |
+
+The bitmap **compounds three wins**:
+
+1. **Storage** — 24× less memory than 3-byte-per-voxel, 32× less than RGBA8
+2. **Bandwidth** — 24× less data fetched per voxel during occupancy checks; on
+   bandwidth-bound shaders (most raymarching loads), this roughly translates
+   to 10-20× faster scans
+3. **Cache locality** — 24× more voxels fit in L1/L2 GPU cache, so sequential
+   scans hit cache vastly better
+
+**Where it really pays off:** sparse scenes (~5% surface occupancy). Pairing
+a dense 1-bit mask with **sparse** RGB storage for populated voxels only:
+
+```
+Dense 1-bit mask + dense RGB:           52 MB  (worst-case)
+Dense 1-bit mask + sparse RGB (5% pop): 4.6 MB (typical voxgaussian scene)
+All-sparse hash table (no mask):         4.0 MB (no O(1) addressing)
+```
+
+The mask version gets **O(1) addressing** (you can query any coord) plus
+**near-sparse-hash memory cost** (just the bytes you actually populated).
+Best of both for the access pattern of "raymarch through mostly-empty volume."
+
+GLSL is one texel fetch + a shift + an AND:
+
+```glsl
+uniform usampler2D occupancyBitmap;   // R8UI, dims atlasW/8 × atlasH
+bool is_occupied(ivec2 atlas_xy) {
+    uint byte_v = texelFetch(occupancyBitmap,
+                              ivec2(atlas_xy.x >> 3, atlas_xy.y), 0).r;
+    return ((byte_v >> (atlas_xy.x & 7)) & 1u) != 0u;
+}
+```
+
+Implementation lives in `pipeline/uvw_atlas.py` as a future addition; the
+8-voxels-per-byte packing is along the X-axis to preserve cache locality
+for the typical "scan a row of voxels" access pattern.
+
 ### Per-channel payload split (the orthogonal axis)
 
 The bits don't have to go entirely into the *address*. The split between address bits and payload bits is independent:

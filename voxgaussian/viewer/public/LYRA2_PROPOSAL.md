@@ -437,6 +437,53 @@ exact module (MIT) at
 
 ---
 
+## Bonus: a same-resolution 1-bit occupancy bitmap
+
+Independent of the byte-width family above, a parallel **1-bit-per-voxel
+companion texture** at the same grid resolution is a low-cost addition
+worth flagging. It answers a single question — *"is this slot populated?"*
+— and lets the cross-attention / inference shader **early-skip the
+multi-byte main-atlas read** for empty voxels.
+
+**Cost:** 2 MB at 256³ (24× smaller than 3-byte-per-voxel RGB storage,
+32× smaller than RGBA8). At 1024³ it's 134 MB.
+
+**Three compounding wins:**
+1. **Storage** — 24× less than 3-byte/voxel
+2. **Bandwidth** — same factor; for bandwidth-bound shaders, 10-20× faster scans
+3. **Cache locality** — 24× more voxels fit in L1/L2 GPU cache
+
+**Pairing with sparse RGB storage** (only allocate bytes for populated
+voxels): dense 1-bit mask gives O(1) addressability + near-hash-table
+memory cost. For Lyra 2's typical scenes (~5% surface occupancy), the
+total memory for occupancy + RGB data drops from 50 MB → ~4.6 MB at 256³.
+
+**For Lyra 2 specifically:** the canonical-coord image has implicit
+emptiness today (pixels where the warp didn't write content are zeros),
+but it's a 3-channel zero check — `all(rgb == 0)` — which the
+cross-attention has to learn to interpret. An explicit 1-bit occupancy
+channel would:
+
+- Make "is this voxel real or padding?" question structural, not learned
+- Cost ~50 KB per inference chunk at Lyra 2's 832 × 480 resolution
+- No model retraining needed if exposed as a separate ControlNet input
+
+GLSL is one texel fetch + a shift + an AND:
+
+```glsl
+uniform usampler2D occupancyBitmap;   // R8UI, dims atlasW/8 × atlasH
+bool is_occupied(ivec2 atlas_xy) {
+    uint byte_v = texelFetch(occupancyBitmap,
+                              ivec2(atlas_xy.x >> 3, atlas_xy.y), 0).r;
+    return ((byte_v >> (atlas_xy.x & 7)) & 1u) != 0u;
+}
+```
+
+Eight voxels packed per byte along the X-axis preserves cache locality
+for "scan a row of voxels" access patterns.
+
+---
+
 ## What this doesn't claim
 
 - **Quality wins.** I don't have the compute to retrain Lyra 2 and
