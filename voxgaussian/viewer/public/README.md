@@ -9,6 +9,11 @@
 >   *(Procedural hamlet scene, side-by-side panes showing the
 >    summary-atlas-class-palette rendering next to the canonical-RGB
 >    rendering. Both panes are the same data, just different shaders.)*
+>
+> 📄 **Read offline / share:**
+> - [README.pdf](https://downtoearth-9lq.pages.dev/README.pdf) (856 KB · 8 pages)
+> - [LYRA2_PROPOSAL.pdf](https://downtoearth-9lq.pages.dev/LYRA2_PROPOSAL.pdf) (482 KB · the architectural RFC)
+> - Markdown-rendered on .dev: [/readme](https://downtoearth-9lq.pages.dev/readme) · [/proposal](https://downtoearth-9lq.pages.dev/proposal)
 
 A JRPG-style WebXR walker plus the **bidirectional voxel ↔ RGB atlas** data
 structure we built for it. The walker is the playground; the atlas is the

@@ -1,15 +1,24 @@
 # Cloudflare Pages routing.
 #
-# Root → photoreal scene demo (Juggernaut XL → 167k Gaussians). The flagship.
-# /uvw  → procedural UVW bijection demo (explains the data structure).
-# /atlas → same as /uvw.
-# /docs → markdown-rendered README at /readme (the .html ext is auto-stripped
-#         by Cloudflare so readme.html is reachable at /readme directly).
+# Root        → photoreal scene demo (Juggernaut XL → 167k Gaussians)
+# /uvw,/atlas → procedural UVW bijection explainer
+# /docs       → README, rendered
+# /proposal,  → LYRA2 architectural RFC, rendered (markdown viewer with ?src=)
+#  /lyra2
 #
-# Cloudflare auto-strips .html, so all targets use canonical extensionless URLs.
-# Don't redirect /readme to /readme — that's a self-loop. Just rely on the
-# auto-strip behaviour to serve readme.html at the /readme path.
-/        /scene_demo  302
-/uvw     /uvw_demo    302
-/atlas   /uvw_demo    302
-/docs    /readme      302
+# Cloudflare auto-strips .html, so the .html targets serve at extensionless
+# paths. Don't redirect a path to itself (self-loop). Direct .pdf files served
+# as static assets — no redirect needed.
+/        /scene_demo                                302
+/uvw     /uvw_demo                                  302
+/atlas   /uvw_demo                                  302
+/docs    /readme                                    302
+/proposal  /readme.html?src=/LYRA2_PROPOSAL.md      302
+/lyra2     /readme.html?src=/LYRA2_PROPOSAL.md      302
+/rfc       /readme.html?src=/LYRA2_PROPOSAL.md      302
+
+# Lowercase PDF aliases for friendly URLs (the .pdf files are served
+# directly as static assets at their actual case-sensitive paths).
+/readme.pdf    /README.pdf            302
+/proposal.pdf  /LYRA2_PROPOSAL.pdf    302
+/lyra2.pdf     /LYRA2_PROPOSAL.pdf    302

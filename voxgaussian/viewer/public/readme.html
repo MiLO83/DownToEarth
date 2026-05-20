@@ -132,18 +132,26 @@ marked.setOptions({
 // Allow raw HTML through (our README uses <table> blocks for the dual-column layout).
 // marked already allows HTML by default; just don't sanitize.
 
+// Generic markdown viewer: ?src=/PATH.md picks which file to render.
+// Defaults to /README.md so the bare /readme route still works.
+const params = new URLSearchParams(window.location.search);
+const src = params.get('src') || '/README.md';
+
 try {
-  const md = await fetch('/README.md').then(r => {
-    if (!r.ok) throw new Error(`Failed to fetch README.md: ${r.status}`);
+  const md = await fetch(src).then(r => {
+    if (!r.ok) throw new Error(`Failed to fetch ${src}: ${r.status}`);
     return r.text();
   });
   const html = marked.parse(md);
   document.getElementById('content').innerHTML = html;
   document.getElementById('loading').classList.add('done');
 
-  // Rewrite GitHub-relative links to point to the source repo (so anchors
-  // inside the README that say things like ./voxgaussian/README.md actually
-  // resolve to GitHub instead of breaking on pages.dev)
+  // Update document.title from the markdown's first H1 if present.
+  const h1 = document.querySelector('main h1');
+  if (h1) document.title = h1.textContent.trim() + ' — Down To Earth';
+
+  // Rewrite GitHub-relative links to point at the source repo so cross-refs
+  // like ./voxgaussian/README.md resolve to GitHub instead of 404-ing here.
   for (const a of document.querySelectorAll('main a')) {
     const href = a.getAttribute('href') || '';
     if (href.startsWith('http') || href.startsWith('#') || href.startsWith('/')) continue;
@@ -151,7 +159,7 @@ try {
   }
 } catch (e) {
   document.getElementById('content').innerHTML =
-    `<h1>Couldn't load README</h1><pre>${e.message}</pre>` +
+    `<h1>Couldn't load ${src}</h1><pre>${e.message}</pre>` +
     `<p>Try <a href="https://github.com/MiLO83/DownToEarth">the source on github</a> directly.</p>`;
   document.getElementById('loading').classList.add('done');
 }
