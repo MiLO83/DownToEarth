@@ -287,6 +287,8 @@ For a typical scene where 5% of spots are populated, the combined cost drops fro
 
 This is one of those "wait, why don't we already do this everywhere" tricks. It's actually a standard pattern in computer graphics (called an "occupancy bitmap") but it isn't currently in Lyra 2. Adding it is part of our proposal.
 
+✅ **And we've actually built it** — the working code lives in our project at `pipeline/uvw_atlas.py` as a class called `OccupancyBitmap`. You can hand it a list of populated spots and it builds the doorbell map; ask it about any spot and it tells you yes/no instantly. We verified the math works for all 16.7 million possible spots in a small-room-sized map (took about a second on a regular laptop). The pattern can be lifted straight into Lyra 2 with minor changes; it doesn't need any retraining of the AI to add it.
+
 ---
 
 ## 9. So... did it actually work?

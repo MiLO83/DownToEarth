@@ -249,6 +249,202 @@ def export_atlas_png(atlas: np.ndarray, path: str) -> None:
     Image.fromarray(atlas, mode=mode).save(path, format="PNG", optimize=False)
 
 
+# ─── Occupancy bitmap — same-grid 1-bit-per-voxel empty/full toggle ───────
+
+
+class OccupancyBitmap:
+    """Same-resolution 1-bit-per-voxel companion to the summary atlas.
+
+    Stores one bit per voxel answering "is this slot populated?". Lets the
+    shader skip the 4-byte main-atlas read for empty voxels via a single-bit
+    test that's 24-32× cheaper in storage *and* bandwidth.
+
+    Memory math (the headline numbers):
+
+      Grid       Voxels      RGBA8 atlas    RGB only    1-bit mask    Ratio
+      256³       16.7M       67 MB          50 MB       2.1 MB        24×
+      512³       134M        537 MB         403 MB      16.8 MB       24×
+      1024³      1.07B       4.3 GB         3.2 GB      134 MB        24×
+
+    Layout: 8 voxels packed per byte along the X axis of the 2D atlas
+    (preserves cache locality for horizontal-scan access patterns).
+    Atlas dims must be divisible by 8 in the X direction.
+
+    For res=256 (atlas 4096×4096): 4096/8 = 512 bytes per row, 4096 rows,
+    total 2 MB. Fits trivially in any GPU's L2 cache.
+
+    GLSL consumption (one texelFetch + shift + AND):
+        uniform usampler2D occupancyBitmap;
+        bool is_occupied(ivec2 atlas_xy) {
+            uint byte_v = texelFetch(
+                occupancyBitmap, ivec2(atlas_xy.x >> 3, atlas_xy.y), 0
+            ).r;
+            return ((byte_v >> (atlas_xy.x & 7)) & 1u) != 0u;
+        }
+
+    >>> bmap = OccupancyBitmap(atlas_w=64, atlas_h=64)
+    >>> bmap.nbytes
+    512
+    >>> bmap.get(0, 0)
+    False
+    >>> bmap.set(0, 0)
+    >>> bmap.get(0, 0)
+    True
+    >>> bmap.set(63, 63)
+    >>> bmap.count_occupied()
+    2
+    >>> bmap.set(0, 0, False)
+    >>> bmap.count_occupied()
+    1
+    """
+
+    def __init__(self, atlas_w: int = ATLAS_SIZE, atlas_h: int = ATLAS_SIZE):
+        if atlas_w % 8 != 0:
+            raise ValueError(
+                f"atlas_w must be divisible by 8 for X-axis bit-packing, got {atlas_w}"
+            )
+        self.atlas_w = atlas_w
+        self.atlas_h = atlas_h
+        # Shape (H, W/8) uint8 — each byte holds 8 horizontally-adjacent voxels.
+        self.bits = np.zeros((atlas_h, atlas_w // 8), dtype=np.uint8)
+
+    def __repr__(self) -> str:
+        n = self.count_occupied()
+        total = self.atlas_w * self.atlas_h
+        pct = (100.0 * n / total) if total > 0 else 0.0
+        return (f"OccupancyBitmap({self.atlas_w}×{self.atlas_h}, "
+                f"{self.nbytes / 1024:.1f} KB, {n}/{total} occupied = {pct:.3f}%)")
+
+    @property
+    def nbytes(self) -> int:
+        """Total bytes used by the bitmap. nvm of voxel count, just the array size."""
+        return int(self.bits.nbytes)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """(atlas_h, atlas_w / 8) — the actual numpy shape of the packed array."""
+        return self.bits.shape
+
+    # ─── Single-voxel access ──────────────────────────────────────────────
+
+    def set(self, atlas_x: int, atlas_y: int, occupied: bool = True) -> None:
+        """Set / clear the bit at (atlas_x, atlas_y)."""
+        byte_idx = atlas_x >> 3
+        bit_idx = atlas_x & 7
+        if occupied:
+            self.bits[atlas_y, byte_idx] |= np.uint8(1 << bit_idx)
+        else:
+            self.bits[atlas_y, byte_idx] &= np.uint8(~(1 << bit_idx) & 0xFF)
+
+    def get(self, atlas_x: int, atlas_y: int) -> bool:
+        """Read the bit at (atlas_x, atlas_y)."""
+        byte_idx = atlas_x >> 3
+        bit_idx = atlas_x & 7
+        return bool((self.bits[atlas_y, byte_idx] >> bit_idx) & 1)
+
+    # ─── Voxel-coord access (uses the same bijection as the summary atlas) ──
+
+    def set_voxel(self, u: int, v: int, w: int, occupied: bool = True) -> None:
+        """Set occupancy at voxel (u, v, w). Uses voxel_to_atlas internally.
+
+        >>> bmap = OccupancyBitmap()
+        >>> bmap.set_voxel(73, 12, 200)
+        >>> bmap.get_voxel(73, 12, 200)
+        True
+        >>> bmap.get_voxel(73, 12, 201)
+        False
+        """
+        ax, ay = voxel_to_atlas(u, v, w)
+        self.set(ax, ay, occupied)
+
+    def get_voxel(self, u: int, v: int, w: int) -> bool:
+        """Read occupancy at voxel (u, v, w)."""
+        ax, ay = voxel_to_atlas(u, v, w)
+        return self.get(ax, ay)
+
+    # ─── Bulk operations ──────────────────────────────────────────────────
+
+    def count_occupied(self) -> int:
+        """Total number of bits set across the whole bitmap."""
+        return int(np.unpackbits(self.bits).sum())
+
+    def occupancy_fraction(self) -> float:
+        """Fraction of voxels populated, in [0, 1]."""
+        total = self.atlas_w * self.atlas_h
+        return self.count_occupied() / total if total > 0 else 0.0
+
+    def fill_from_voxel_iter(self, voxels) -> int:
+        """Bulk-set occupancy from any iterable of (u, v, w) tuples.
+
+        Returns the count of voxels written. Vectorised via voxel_to_atlas_vec
+        for large lists. ~30× faster than calling set_voxel in a loop.
+        """
+        voxels = list(voxels)
+        if not voxels:
+            return 0
+        coords = np.asarray(voxels, dtype=np.int32)
+        if coords.ndim != 2 or coords.shape[1] != 3:
+            raise ValueError(f"Expected list of (u, v, w) triples; got shape {coords.shape}")
+        atlas_xy = voxel_to_atlas_vec(coords)
+        ax = atlas_xy[:, 0]
+        ay = atlas_xy[:, 1]
+        byte_idx = ax >> 3
+        bit_mask = (1 << (ax & 7)).astype(np.uint8)
+        # Use np.bitwise_or.at for unbuffered scatter (handles duplicates correctly)
+        np.bitwise_or.at(self.bits, (ay, byte_idx), bit_mask)
+        return len(voxels)
+
+    def fill_from_dense_array(self, dense_occupied: np.ndarray) -> None:
+        """Initialise from a dense (VOXEL_RES, VOXEL_RES, VOXEL_RES) bool array.
+
+        For each voxel where dense_occupied[u, v, w] is True, set the bit.
+        """
+        if dense_occupied.shape != (VOXEL_RES, VOXEL_RES, VOXEL_RES):
+            raise ValueError(
+                f"Expected ({VOXEL_RES}, {VOXEL_RES}, {VOXEL_RES}); got {dense_occupied.shape}"
+            )
+        coords = np.argwhere(dense_occupied)
+        if coords.size > 0:
+            self.fill_from_voxel_iter([tuple(c) for c in coords])
+
+    # ─── Serialise / deserialise ──────────────────────────────────────────
+
+    def to_bytes(self) -> bytes:
+        """Raw byte buffer in row-major order, atlas_h × (atlas_w / 8) bytes."""
+        return self.bits.tobytes()
+
+    @classmethod
+    def from_bytes(
+        cls, data: bytes, atlas_w: int = ATLAS_SIZE, atlas_h: int = ATLAS_SIZE
+    ) -> "OccupancyBitmap":
+        """Reconstruct from to_bytes() output. The atlas dims must match."""
+        expected_bytes = atlas_h * (atlas_w // 8)
+        if len(data) != expected_bytes:
+            raise ValueError(
+                f"Byte length {len(data)} does not match expected {expected_bytes} "
+                f"for {atlas_w}×{atlas_h} atlas"
+            )
+        out = cls(atlas_w, atlas_h)
+        out.bits = np.frombuffer(data, dtype=np.uint8).reshape(
+            (atlas_h, atlas_w // 8)
+        ).copy()
+        return out
+
+    @classmethod
+    def from_voxel_store(
+        cls, histogram: dict[tuple[int, int, int], dict[int, int]]
+    ) -> "OccupancyBitmap":
+        """Build a bitmap from voxgaussian's sparse histogram dict.
+
+        Any voxel that appears in the dict (regardless of vote count) is
+        considered populated. Use this to pair the bitmap with the existing
+        summary atlas built by build_summary_atlas().
+        """
+        out = cls()
+        out.fill_from_voxel_iter(histogram.keys())
+        return out
+
+
 # ─── Active-view priority (one of the consumers the atlas serves) ──────────
 
 def view_priority_from_summary(summary_atlas: np.ndarray) -> np.ndarray:
@@ -308,7 +504,7 @@ if __name__ == "__main__":
     rng = np.random.default_rng(0)
     # 8 randomly-classed voxels with varying confidence
     hist = {
-        (rng.integers(256), rng.integers(256), rng.integers(256)):
+        (int(rng.integers(256)), int(rng.integers(256)), int(rng.integers(256))):
             {int(c): int(n) for c, n in zip(
                 rng.choice(11, size=3, replace=False),
                 rng.integers(1, 50, size=3),
@@ -318,3 +514,21 @@ if __name__ == "__main__":
     atlas = build_summary_atlas(hist)
     print(f"  summary atlas: shape={atlas.shape} dtype={atlas.dtype}")
     print(f"  non-zero pixels: {(atlas[..., 1] > 0).sum()}")
+
+    print("\nOccupancy bitmap from the same histogram:")
+    bmap = OccupancyBitmap.from_voxel_store(hist)
+    print(f"  {bmap!r}")
+    print(f"  expected occupied count: {len(hist)}")
+    actual = bmap.count_occupied()
+    print(f"  bitmap occupied count:   {actual}")
+    print(f"  round-trip check: ", end="")
+    # Verify every voxel from the histogram reads back as occupied
+    ok = all(bmap.get_voxel(*idx) for idx in hist)
+    # And a few random non-populated voxels read back as empty
+    not_in_hist = [
+        (i, i, i) for i in [0, 100, 200] if (i, i, i) not in hist
+    ]
+    ok = ok and not any(bmap.get_voxel(*idx) for idx in not_in_hist)
+    print("OK" if ok else "FAILED")
+    print(f"  total memory: {bmap.nbytes / 1024 / 1024:.2f} MB for a 4096² atlas")
+    print(f"  vs RGBA8 summary atlas: {atlas.nbytes / 1024 / 1024:.1f} MB ({atlas.nbytes / bmap.nbytes:.0f}× ratio)")

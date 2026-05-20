@@ -596,9 +596,12 @@ bool is_occupied(ivec2 atlas_xy) {
 }
 ```
 
-Implementation lives in `pipeline/uvw_atlas.py` as a future addition; the
-8-voxels-per-byte packing is along the X-axis to preserve cache locality
-for the typical "scan a row of voxels" access pattern.
+**Implementation shipped** in [`pipeline/uvw_atlas.py`](voxgaussian/pipeline/uvw_atlas.py)
+as the `OccupancyBitmap` class — 8-voxels-per-byte X-axis packing for cache
+locality, doctested + verified inside the self-test (`python -m pipeline.uvw_atlas`).
+Loads directly from voxgaussian's sparse histogram dict via
+`OccupancyBitmap.from_voxel_store(...)`. Memory: 2 MB at 4096² atlas (256³ voxels),
+32× smaller than the RGBA8 summary atlas.
 
 ### Per-channel payload split (the orthogonal axis)
 

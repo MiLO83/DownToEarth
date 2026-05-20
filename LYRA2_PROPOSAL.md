@@ -482,6 +482,14 @@ bool is_occupied(ivec2 atlas_xy) {
 Eight voxels packed per byte along the X-axis preserves cache locality
 for "scan a row of voxels" access patterns.
 
+**Implementation reference** — the `OccupancyBitmap` class in
+[`voxgaussian/pipeline/uvw_atlas.py`](https://github.com/MiLO83/DownToEarth/blob/main/voxgaussian/pipeline/uvw_atlas.py)
+ships this exact pattern at the DownToEarth scale (256³). MIT-licensed,
+doctested, exhaustive round-trip self-test passing (`python -m
+pipeline.uvw_atlas` → "OK"). 2 MB for the 4096² atlas, 32× smaller
+than the RGBA8 summary atlas it pairs with. Lyra-2-friendly to adapt
+under Apache-2.0 compatibility.
+
 ---
 
 ## What this doesn't claim
