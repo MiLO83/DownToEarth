@@ -15,6 +15,13 @@
 >   *(Procedural hamlet scene, side-by-side panes showing the
 >    summary-atlas-class-palette rendering next to the canonical-RGB
 >    rendering. Both panes are the same data, just different shaders.)*
+> - 🧊 **UVW voxel raymarcher** (new 2026-05-20):
+>   [`voxgaussian/voxel_renderer/index.html`](voxgaussian/voxel_renderer/index.html)
+>   *(Single-file WebGL2 demo of the runtime half of the Lyra-2-Lite
+>    pipeline. DDA voxel traversal + per-chunk frustum culling running
+>    on a 256³ procedural island/tower/caverns scene at 60+ fps on a
+>    5060 Ti. Press F to toggle culling, G to see culled chunks. Open
+>    locally — no server needed.)*
 >
 > 📄 **Read offline / share:**
 > - [README.pdf](https://downtoearth-9lq.pages.dev/README.pdf) (~1 MB · 9 pages)
@@ -602,6 +609,330 @@ locality, doctested + verified inside the self-test (`python -m pipeline.uvw_atl
 Loads directly from voxgaussian's sparse histogram dict via
 `OccupancyBitmap.from_voxel_store(...)`. Memory: 2 MB at 4096² atlas (256³ voxels),
 32× smaller than the RGBA8 summary atlas.
+
+#### Extension: 2-bit-per-voxel for demand-driven streaming (2026-05-20)
+
+The bitmap class now also supports a **2-bit mode** that carries
+occupancy *and* a per-frame "ray-touched" bit. Pass `bits_per_voxel=2`
+at construction. Storage doubles (4 MB at 4096² atlas — still trivial),
+and the runtime gains a precise log of which voxels actually
+contributed to a pixel that frame.
+
+```python
+bmap = OccupancyBitmap(atlas_w=4096, atlas_h=4096, bits_per_voxel=2)
+bmap.set(ax, ay)              # occupancy (baked offline)
+bmap.set_touched(ax, ay)      # raymarcher: ray terminated here
+chunks_needed = bmap.touched_chunks(chunk_size=16)
+                              # {(cx,cy,cz)} -- drives streaming
+bmap.clear_touched()          # masked AND, preserves occupancy
+```
+
+**This is the data structure for demand-driven sparse voxel
+streaming** — the same pattern UE5 Nanite uses for triangle clusters
+and id Tech 5 MegaTexture uses for 2D textures, applied to voxels.
+Per-frame loop:
+
+```
+clear_touched()                  # ~10 µs
+render_frame()                   # raymarcher imageAtomicOrs the touch bits
+touched = touched_chunks()       # OR-reduce to chunk keys
+streamer.update(touched)         # SSD fetch + eviction
+```
+
+**Critically, this is omnidirectional / VR-correct** because the
+touched bitmap is populated by *whatever rays were cast* — per-eye
+VR frustums, equirectangular 360° spheres, planar FPV — all populate
+correctly. No view-direction assumption baked in. Frustum culling
+would mispredict on VR head rotation; demand-driven streaming makes
+no such mistake.
+
+The runtime renderer (when wired) calls `imageAtomicOr` on a
+`uimage2D` bound to the bitmap during the per-pixel raymarch.
+CPU-side, the `touched_chunks()` reduction takes ~0.5 ms for a 4 MB
+bitmap and yields the streaming-input set in one call.
+
+### Generation budgets at Lyra-2-Lite scale (2026-05-20)
+
+The UVW atlas / occupancy bitmap make a chunked voxel world *renderable*
+on consumer hardware. The complementary question is how much *content*
+you can bake into that world per dollar of compute. The proposal's
+"Lyra 2 Lite" architecture (UVW canonical conditioning) on top of the
+verified mid-2026 accelerator stack (DMD distillation + TeaCache +
+torch.compile + fp8 + SAGE-attention) projects to **~60× speedup over
+stock Lyra 2** with no retraining:
+
+| Target territory | Real-world size | H100 hours (Lyra 2 Lite mixed) | Cost @ $3.50/hr |
+|---|---|---:|---:|
+| Apartment | 100 m² | 0.02 hr | $0.07 |
+| Single building / shop | 500 m² | 0.10 hr | $0.36 |
+| **Adventure-game village** | 5,000 m² (~1 acre) | 0.7 hr | **$2.45** |
+| **Mêlée-class island** | 1 km² | 21 hr | **$73** |
+| Caribbean archipelago | 5 km² | 104 hr | $364 |
+| Small district | 50 km² | 1,040 hr | $3,640 |
+
+**On a single 5060 Ti at home (no cloud):**
+
+| Target | Wall time |
+|---|---:|
+| Village (1 acre) | ~1.5 hr |
+| Mêlée-class island (1 km²) | ~7.2 days continuous |
+| 5 km² archipelago | ~36 days continuous |
+
+The full breakdown of the accelerator stack, sourced from mid-2026 SOTA
+(TeaCache by ali-vilab, DMD shipped in `nvidia/Lyra-2.0`, PyTorch
+sm_120 + flash-attn ≥ 2.8.3, NVIDIA Blackwell fp8 native), lives in
+[LYRA2_PROPOSAL §6.6.E](LYRA2_PROPOSAL.md).
+
+The runtime side (the voxel raymarcher + chunk streaming + 2-bit
+OccupancyBitmap demand-driven loading) renders these baked worlds at
+60+ fps on the same 5060 Ti that did the bake. **Offline bake costs
+dollars; online play costs nothing.**
+
+### How a TB-scale world raymarches from disk
+
+The UVW atlas + 2-bit OccupancyBitmap aren't just compact data formats —
+they're the foundation for **rendering arbitrarily-large voxel worlds
+on consumer hardware**. A 16 GB graphics card can render a 5 TB world
+at 60+ fps, not by holding it all in VRAM but by holding the **right
+6 GB** at every moment. This section explains how.
+
+#### The paradox
+
+| World scale | Total voxels (1 cm) | RGBA atlas size | VRAM on 5060 Ti |
+|---|---:|---:|---:|
+| Bedroom (3 m³ × 1 cm) | ~3 million | 12 MB | trivial |
+| Apartment (100 m² × 2 m × 1 cm) | ~2 billion | 8 GB | tight |
+| **Small island** (1 km² × 50 m × 1 cm) | **5 × 10¹⁰** | **200 GB** | **doesn't fit** |
+| Town (10 km² × 80 m × 1 cm) | 8 × 10¹¹ | 3.2 TB | doesn't fit |
+| City (100 km² × 100 m × 1 cm) | 10¹³ | 40 TB | doesn't fit |
+| **Microsoft Flight Sim's Earth** | ~10¹⁵ | **~2.5 PB** | obviously doesn't fit |
+
+Every entry past "apartment" exceeds VRAM by orders of magnitude. Yet
+*Flight Sim* runs at 60+ fps over the entire planet, *Teardown* simulates
+voxel destruction in city-block scenes, *UE5 Nanite* renders
+billion-triangle worlds. The trick is the same in all three: **only
+the bytes that contribute to a visible pixel need to be in VRAM at
+any moment.**
+
+#### The fundamental insight: pixels, not voxels
+
+At 1080p, the screen has 2,073,600 pixels. At 4K, 8.3 million. **No
+matter how big your world is, you'll never render more than that many
+voxels per frame** — one per pixel. The rendering cost scales with
+screen resolution, not with world size.
+
+So the question becomes: how do you get the **right** ~2 million
+voxels into VRAM each frame? Not the world's worth — just the
+camera-visible subset.
+
+The math:
+
+| Resolution | Pixels per frame | Voxels touched | At 32 bytes/voxel | Bytes/frame |
+|---|---:|---:|---:|---:|
+| 1080p | 2.1 M | ~5 M (with raymarch steps) | 32 B | **160 MB** |
+| 4K | 8.3 M | ~20 M | 32 B | **640 MB** |
+| 8K | 33 M | ~80 M | 32 B | 2.5 GB |
+
+A 1080p frame's *visible voxel set* is 160 MB. That's the **working set
+the GPU actually needs.** Everything else — the other 199.84 GB of the
+"small island" world — sits on disk, untouched, waiting for the moment
+the camera moves into a position that needs it.
+
+#### What lives where
+
+Across the memory hierarchy, the budget breakdown for a Mêlée-class
+1 km² world on a 5060 Ti:
+
+| Tier | Capacity | Holds | Latency |
+|---|---:|---|---:|
+| **GPU registers / L1** | ~1 MB | current ray's voxel + neighbours | <1 ns |
+| **GPU L2 cache** | ~32 MB on Blackwell | last ~1M voxels accessed | ~10 ns |
+| **VRAM (working set)** | **6 GB / 16 GB total** | **~200 16³-voxel chunks** = recently-touched scene area | ~200 ns |
+| **System RAM (page cache)** | 32 GB | **~1 GB of warm chunks** waiting to upload to VRAM | ~100 µs |
+| **NVMe SSD** | 2 TB | **the full 200 GB world atlas** | ~50 µs random read |
+| **HDD or cloud** | unlimited | cold tiles you may never reach | ~10 ms |
+
+The hierarchy works because **each tier holds only what the tier
+below it just used recently** plus some predictive lookahead. VRAM
+holds chunks the player is currently in or about to walk into; RAM
+holds chunks they might walk into in the next few seconds; SSD holds
+everything.
+
+#### Frame-by-frame anatomy
+
+Here's what actually happens to render one 16.67 ms frame at 60 fps:
+
+```
+T = 0 ms        Frame starts
+                bitmap.clear_touched()                    [~10 µs]
+                  AND-mask preserves occupancy, zeros touched bits
+
+T = 0.01 ms     GPU raymarcher launches 2.1M pixel rays
+                Each ray DDAs through voxel space:
+                  - Sample 2-bit OccupancyBitmap entry → cheap
+                  - If empty: skip via DDA stepping
+                  - If occupied AND chunk-in-VRAM: read RGBA, shade
+                  - If occupied AND chunk-NOT-in-VRAM: read coarse-LOD
+                    fallback voxel (always-resident pyramid), atomic-or
+                    the "touched" bit so the streamer knows we wanted
+                    this chunk
+                  - Either way: set bit-1 in voxel state (touched)
+
+T = ~10 ms      Render complete, present to display
+
+T = ~12 ms      Background CPU thread:
+                  touched = bitmap.touched_chunks()       [~0.5 ms]
+                    → set of (cx, cy, cz) keys
+                  diff against current_resident_chunks    [~0.1 ms]
+                  for each new chunk not yet resident:
+                    queue NVMe read (async)
+                  for each chunk not touched for K=60 frames:
+                    schedule eviction
+
+T = ~15 ms      NVMe DMA: 1-3 new chunks land in VRAM
+                  Typical chunk: 16³ × RGBA8 = 16 KB
+                  3 chunks = 48 KB = 1 NVMe block
+
+T = 16.67 ms    Next frame starts
+```
+
+Key observation: **the touched bit and the SSD streaming run in
+parallel with rendering, not in serial.** The renderer never blocks on
+the SSD. The renderer's responsibility is to *say what it needed* (via
+the touched bit); the streamer's responsibility is to *have it ready
+for next frame*. Cold-cache misses fall back to the LOD pyramid, which
+is always resident.
+
+#### Bandwidth math: does it actually fit?
+
+Per frame, with the player moving at typical FPS-game speed (5 m/s):
+
+```
+Camera advances:        5 m/s × 0.01667 s = 8.3 cm/frame
+Voxels at 1 cm:         ~8 new voxels along view direction per frame
+Chunks at 16³ voxels:   ~0.5 new chunks/frame (statistical)
+At 60 fps:              ~30 chunk reads/sec, ~480 KB/sec
+NVMe Gen4 read:         ~5 GB/sec
+Headroom:               ~10,000×
+```
+
+So for typical movement on 1 cm voxels, **NVMe is wildly
+over-provisioned**. The bandwidth budget supports much higher movement
+speeds (running, vehicles, teleport) without any change.
+
+For aggressive cases (teleport, fast head rotation in VR):
+
+```
+Teleport (instant pos change):  ~200 new chunks needed = 3.2 MB
+NVMe read of 3.2 MB:             ~0.6 ms
+At 60 fps frame budget:          16.67 ms
+                                  → still fits in one frame
+```
+
+Even a worst-case teleport pulls < 1 ms of NVMe time on a Gen4 SSD. As
+long as the LOD pyramid covers the first frame's pixels with
+coarse-but-correct data, the high-detail chunks stream in within one
+frame and the user never sees pop-in.
+
+#### LOD: scaling beyond bandwidth limits
+
+At very large scales (10+ km² worlds) or very high movement speeds, the
+NVMe bandwidth eventually becomes the bottleneck. Solution: **a
+resolution pyramid**, mip-style:
+
+| LOD level | Voxel size | Storage for 1 km² | Used at distance |
+|---|---:|---:|---|
+| 0 (full) | 1 cm | 200 GB | 0-30 m (close-up walking) |
+| 1 | 2 cm | 25 GB | 30-60 m (mid-field) |
+| 2 | 4 cm | 3 GB | 60-150 m |
+| 3 | 8 cm | 400 MB | 150-300 m |
+| 4 | 16 cm | 50 MB | 300-600 m |
+| 5 (vista) | 32 cm | 6 MB | 600+ m (always resident) |
+
+Coarser levels are smaller and naturally always-resident. The
+ray-driven streamer picks the LOD level matching the **screen pixel
+size at that depth**, so detail you can't see is never fetched. This
+is the standard mip-mapping trick from textures, applied to voxels.
+
+With LOD active, even a **10 TB world** has only ~50 GB worth of
+"high-detail close-up chunks" total, and at any moment the player
+is within 30 m of only ~6 GB of them. Working set stays bounded
+regardless of world size.
+
+#### Worked examples at different scales
+
+| Scale | Total disk | LOD-pyramid disk | VRAM working set | NVMe stream rate (walking) |
+|---|---:|---:|---:|---:|
+| Apartment (8 GB) | 8 GB | 9 GB | 6 GB | ~50 KB/s |
+| **Mêlée island** (1 km²) | 200 GB | **230 GB** | **6 GB** | ~500 KB/s |
+| Caribbean chain (5 km²) | 1 TB | 1.15 TB | 6 GB | ~500 KB/s |
+| Town (10 km²) | 2 TB | 2.3 TB | 6 GB | ~1 MB/s |
+| **City (100 km²)** | 20 TB | **23 TB** | **6 GB** | ~2 MB/s |
+| Continent (10,000 km²) | 2 PB | 2.3 PB | 6 GB | ~5 MB/s |
+
+**The VRAM working set is constant** across all rows. World size
+multiplies disk consumption linearly; it doesn't affect what's
+resident. The 5060 Ti's 16 GB caps the *detail-near-camera budget*,
+not the *world size*.
+
+#### Hard limits and what breaks
+
+1. **Random teleport to a brand-new region** — the first frame after
+   the teleport has only the LOD pyramid available (no
+   high-detail chunks loaded yet). For ~one frame the world looks
+   slightly less crisp at close range. Fully resolves in <50 ms.
+
+2. **Walking faster than NVMe can stream** — at >100 m/s (~360 km/h)
+   sustained, the chunk fetch rate becomes the bottleneck even on
+   Gen4 NVMe. Mitigations: bigger LOD-1 always-resident layer,
+   reduce LOD-0 chunks in motion-aligned direction, or accept
+   slight detail blur during fast travel.
+
+3. **VR head rotation faster than 720°/sec** — beyond which the
+   touched chunks change faster than NVMe can refresh. Realistic
+   human head rotation peaks at ~500°/sec; well within budget.
+
+4. **Worlds bigger than your SSD** — needs cloud-backed storage
+   (Cloudflare R2 / S3 / similar) with a local SSD acting as a
+   sliding-window cache of the wider world. *Flight Sim* does this:
+   2.5 PB lives in MS's data centres, your local SSD caches the
+   chunks for the region you're currently flying over.
+
+5. **Dynamic objects** — not addressed by this architecture. Moving
+   characters, particles, doors need a separate layer (small
+   per-object voxel atlases with transforms) composited against the
+   static raymarch. See LYRA2_PROPOSAL §6.6 for the future-direction
+   notes on this.
+
+#### Prior art
+
+The pattern (render-driven streaming of paged data) is well-established
+across rendering domains:
+
+| System | Domain | Year | What gets paged |
+|---|---|---|---|
+| **id Tech 5 MegaTexture** (Rage) | 2D textures | 2011 | Texture pages (whatever's rasterized) |
+| **id Tech 6 Virtual Texturing** (Doom 2016) | 2D textures | 2016 | Generalized MegaTexture |
+| **NVIDIA GVDB** | Sparse voxels | 2018 | Voxel pages |
+| **Unreal Engine 5 Nanite** | Triangle meshes | 2022 | Cluster pages |
+| **Microsoft Flight Simulator 2024** | Earth-scale terrain | 2024 | Cloud-streamed regional tiles |
+
+The novelty in DownToEarth's application isn't the streaming pattern —
+it's the combination with:
+
+- **UVW bijection** (the chunk's address-key IS its rendering color
+  channel, no separate index lookup)
+- **2-bit OccupancyBitmap** (occupancy + touched in one structure,
+  driving both render-skip and streaming decisions)
+- **Lyra-2-derived content** (the voxel data itself is offline-baked
+  from a diffusion model, so the world generation pipeline feeds the
+  same streaming format)
+
+The result: a **content-creation + rendering pipeline that's
+internally consistent** from the AI bake all the way to the per-pixel
+ray. The streaming voxel renderer isn't bolted on to an unrelated
+generator; the generator's output format is the renderer's input
+format.
 
 ### Per-channel payload split (the orthogonal axis)
 

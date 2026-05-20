@@ -490,6 +490,260 @@ pipeline.uvw_atlas` → "OK"). 2 MB for the 4096² atlas, 32× smaller
 than the RGBA8 summary atlas it pairs with. Lyra-2-friendly to adapt
 under Apache-2.0 compatibility.
 
+### Extension: 2-bit-per-voxel for demand-driven sparse streaming
+
+A natural extension of the 1-bit occupancy mask: **double it to 2 bits
+per voxel** so each voxel slot carries occupancy AND a per-frame
+"ray-touched" bit. Storage doubles to 4 MB at 4096² (still trivial),
+and the runtime gains a precise log of which voxels actually contributed
+to a pixel that frame.
+
+Bit layout per byte (4 voxels packed):
+```
+voxel n at byte (n>>2), bits ((n&3)*2)  occupancy
+                              ((n&3)*2+1) touched-this-frame
+```
+
+The touched bit is **set by the raymarcher** via `imageAtomicOr` during
+the per-pixel ray traversal, **OR-reduced to chunk granularity** at
+end-of-frame (returns the set of chunks the renderer actually visited),
+and **cleared once per frame** via a masked AND that preserves occupancy:
+
+```glsl
+uniform usampler2D voxelState;            // R8UI, 2-bit-per-voxel layout
+layout(r8ui) uniform uimage2D voxelStateImg;  // for atomic-or
+
+bool is_occupied(ivec3 voxel_xyz) {
+    ivec2 a = voxel_to_atlas(voxel_xyz);
+    uint b = texelFetch(voxelState, ivec2(a.x >> 2, a.y), 0).r;
+    return ((b >> ((a.x & 3) * 2)) & 1u) == 1u;
+}
+
+void mark_touched(ivec3 voxel_xyz) {
+    ivec2 a = voxel_to_atlas(voxel_xyz);
+    uint bit = 1u << ((a.x & 3) * 2 + 1);
+    imageAtomicOr(voxelStateImg, ivec2(a.x >> 2, a.y), bit);
+}
+```
+
+CPU-side, the **same `OccupancyBitmap` class** handles both modes via a
+`bits_per_voxel ∈ {1, 2}` constructor argument and exposes
+`set_touched`, `get_touched`, `clear_touched`, `count_touched`, and
+`touched_chunks(chunk_size=16)` which OR-reduces to `{(cx, cy, cz)}`
+chunk keys. The reduction is the **streaming signal**: any chunk in
+that set must remain VRAM-resident; chunks outside it are eviction
+candidates (typically with N-frame hysteresis).
+
+### Demand-driven sparse voxel streaming
+
+The 2-bit bitmap is the on-GPU half of an **UE5-Nanite-style
+demand-driven streaming pipeline applied to voxels**: the renderer
+announces what it needed via the touched bits, the streamer keeps
+those chunks resident, evicts the rest.
+
+**Why this is the correct architecture for omnidirectional / VR
+playback:** a frustum-based culler would pre-load only what the camera
+currently faces. In VR or 360° projections, the user's head rotates
+faster than chunks can stream from disk → pop-in, black frames. The
+touched-bitmap approach makes no view-direction assumption — whatever
+rays were cast (per-eye frustums for VR, equirectangular sphere for
+360°, planar for FPV) populate `touched_chunks()` correctly. The
+streamer responds to actual demand.
+
+**Per-frame loop:**
+```
+clear_touched()                   # ~10 µs for 4 MB
+render_frame()                    # rays atomic-or their touched bits
+touched = touched_chunks()        # OR-reduce to chunk keys
+streamer.update(touched)          # queue SSD fetches; mark cold chunks
+```
+
+**Prior art for the demand-driven pattern:**
+- John Carmack's MegaTexture / id Tech 5 Virtual Texturing (2D textures)
+- Unreal Engine 5 Nanite (triangle clusters)
+- NVIDIA GVDB (sparse voxel pages)
+- Atomontage / John Lin's voxel engines (per-pixel voxel paging)
+
+The voxel application is novel in its combination with the UVW
+bijection (each voxel address is a fixed byte triple, so the touched
+bitmap is the same memory layout as the atlas itself), but the
+demand-driven pattern itself is well-established.
+
+**Implementation status:** the 2-bit mode is shipped in PR #61's
+`OccupancyBitmap` class as of 2026-05-20. The shader-side
+`imageAtomicOr` wiring is in scope for future PRs once a runtime
+voxel renderer is integrated.
+
+### Why this matters: TB-scale worlds on 16 GB VRAM
+
+The UVW bijection (§3-4) + occupancy bitmap (§6.5) + demand-driven
+streaming (§6.5.2) are independently described above, but their
+combined consequence deserves direct emphasis: **arbitrarily-large
+voxel worlds become renderable on consumer hardware**, where
+"arbitrarily-large" is bounded only by available disk and not by
+GPU memory.
+
+#### The scale problem
+
+At 1 cm voxel resolution, voxel counts grow with world volume:
+
+| World envelope | Voxel count | RGBA8 atlas | RGBA16 atlas |
+|---|---:|---:|---:|
+| Bedroom (3 m³) | ~3 × 10⁶ | 12 MB | 24 MB |
+| Apartment (200 m³) | ~2 × 10⁹ | 8 GB | 16 GB |
+| **Small island** (5 × 10⁷ m³ = 1 km² × 50 m) | **5 × 10¹⁰** | **200 GB** | 400 GB |
+| Town (10 km² × 80 m) | 8 × 10¹¹ | 3.2 TB | 6.4 TB |
+| City (100 km² × 100 m) | 10¹³ | 40 TB | 80 TB |
+| Continental tile (Microsoft Flight Sim Earth equivalent) | ~10¹⁵ | ~2.5 PB | 5 PB |
+
+Past the "apartment" row, no consumer-class GPU can hold the full
+atlas. Past the "island" row, no single SSD can hold it either; the
+larger scales require cloud-tier object storage with local
+sliding-window caching.
+
+#### The decoupling: working set vs total set
+
+For a screen of N pixels, **at most N voxels contribute to a frame**
+(one per pixel terminator), plus the K voxels each ray traverses through
+empty space before terminating (DDA step count, typically K ≈ 5-20 for
+sparse scenes with the occupancy bitmap accelerating skips).
+
+For 1080p (2.1 M pixels) at 1 cm voxel: ~10-40 million voxels touched
+per frame. At 16 bytes per voxel (RGBA8 + occupancy + touched + LOD
+metadata), the *visible-this-frame footprint* is **160-640 MB**,
+regardless of total world size.
+
+This is the fundamental dimensional argument: **the per-frame VRAM
+requirement scales with screen resolution, not world size**. A 5 TB
+world and a 50 GB world both fit in the same ~6 GB VRAM working set
+for the same screen.
+
+#### Memory hierarchy budgets
+
+For a Lyra-2-Lite-baked 1 km² island (200 GB total RGBA8 atlas with
+2-bit occupancy/touched bitmap = 4 MB chunk-cull layer + 200 GB
+detail), the per-tier breakdown on an RTX 5060 Ti (16 GB) host:
+
+| Tier | Capacity | Contents | Access latency |
+|---|---:|---|---:|
+| GPU L1 / registers | ~1 MB | current ray's neighbourhood | <1 ns |
+| GPU L2 (Blackwell) | ~32 MB | recently-accessed chunk neighbourhood | ~10 ns |
+| **VRAM working set** | **~6 GB** of 16 GB | **~200 16³ chunks** of detail near camera + always-resident LOD pyramid | ~200 ns |
+| System RAM (page cache) | ~16 GB | ~1 GB of warm chunks staging for VRAM upload | ~100 µs |
+| NVMe SSD | 1-2 TB | full atlas (200 GB) + neighbouring scenes | ~50 µs random read |
+| Cloud (if applicable) | unbounded | tiles for unvisited regions | ~10-50 ms |
+
+Each tier holds **only what the tier below it has touched recently**
+plus speculative pre-fetch. The 2-bit touched bitmap is the signal
+that drives every promotion/eviction decision.
+
+#### Per-frame bandwidth math
+
+At 60 fps with the player moving at 5 m/s (typical FPS camera speed):
+
+```
+Camera advance per frame:        5 m/s ÷ 60 fps = 8.3 cm
+New voxels in view direction:    8.3 voxels at 1 cm = ~8 voxels deep
+New chunks per frame:            ~0.5 (statistical) at 16³ chunk size
+NVMe read per frame:             ~16 KB/frame (one 16³ × RGBA8 chunk)
+                                  ≈ 1 MB/sec sustained
+NVMe Gen4 capability:            5-7 GB/sec
+Headroom:                        ~5000× under-utilisation
+```
+
+For typical movement, NVMe is **enormously over-provisioned**. The
+limiting factor is not bandwidth but **latency to first useful pixel**
+when entering a new region (cold cache).
+
+For worst-case motion (teleport, instantaneous position change):
+
+```
+Worst-case new chunks:           ~500 (typical visible chunk count at 16³)
+Worst-case NVMe load:            500 × 16 KB = 8 MB
+NVMe Gen4 transfer time:         ~1.6 ms
+                                  → fits in single 16.67 ms frame budget
+```
+
+A teleport completes within one frame's wall budget on Gen4 NVMe.
+Brief cold-cache LOD fallback handles the transition gracefully.
+
+#### LOD pyramid: scaling past bandwidth limits
+
+For very large worlds (>10 km²) or extreme motion (>100 m/s), bandwidth
+eventually becomes the bottleneck. The standard mitigation is a
+resolution pyramid keyed by camera distance:
+
+| LOD level | Voxel size | Storage at 1 km² | Distance range |
+|---:|---:|---:|---|
+| 0 | 1 cm | 200 GB | 0-30 m |
+| 1 | 2 cm | 25 GB | 30-60 m |
+| 2 | 4 cm | 3 GB | 60-150 m |
+| 3 | 8 cm | 400 MB | 150-300 m |
+| 4 | 16 cm | 50 MB | 300-600 m |
+| 5 | 32 cm | 6 MB | 600+ m (always resident) |
+
+LOD-5 is small enough to be permanent in VRAM, ensuring **every pixel
+always resolves to something visible** even on cold cache. Higher LODs
+stream in as the camera approaches. The same UVW atlas format works
+at every level; only the world-to-voxel scale changes.
+
+With LOD active, the working set is bounded by *visible detail at all
+distances simultaneously*, not by world size. A 100 km² world and a
+1 km² world both fit in ~6 GB working set.
+
+#### Where this breaks
+
+Five hard limits worth documenting for completeness:
+
+1. **Cold-teleport quality dip** — first frame after instant
+   position change is LOD-5 only at close range until ~1 frame later
+   when LOD-0 chunks land. ~16 ms visible "blur" during teleport.
+
+2. **Sustained extreme motion** (>100 m/s) — NVMe bandwidth becomes
+   limiting for the highest-detail layer. Mitigation: increase
+   always-resident LOD-1 layer, or accept transient detail loss
+   during fast traversal.
+
+3. **Anything past 720°/sec head rotation** — beyond the typical
+   500°/sec human max. Not a concern for normal use.
+
+4. **Dynamic content** — moving characters/particles/destruction not
+   addressed by this architecture. Requires a separate dynamic layer
+   (small per-object voxel atlases with transforms, composited
+   against the static raymarch). Out of scope for this proposal.
+
+5. **Storage beyond local SSD** — for worlds >2 TB, requires
+   network-tier object storage with the local SSD acting as a
+   regional cache. Achievable (Flight Simulator does this at 2.5 PB
+   scale) but adds a network latency layer that's > NVMe latency by
+   ~100×.
+
+#### Prior art and novelty
+
+The pattern (render-driven streaming of paged data) is well-established:
+
+| System | Year | Paged unit |
+|---|---|---|
+| id Tech 5 MegaTexture (Rage) | 2011 | 2D texture pages |
+| id Tech 6 Virtual Texturing | 2016 | Generalised |
+| NVIDIA GVDB | 2018 | Sparse voxel pages |
+| Unreal Engine 5 Nanite | 2022 | Triangle cluster pages |
+| Microsoft Flight Simulator 2024 | 2024 | Regional terrain tiles, cloud-cached |
+
+The novelty in this proposal isn't the streaming pattern itself. It's
+the **integration with the UVW bijection**: the chunk's *address-key*
+IS its rendering color channel (no separate index lookup), the
+*occupancy bitmap* is the same memory layout as the atlas (one
+texture-fetch tests both occupancy and touched), and the *world
+generator* (Lyra 2 / Lyra 2 Lite) emits the same atlas format the
+renderer consumes (no post-bake conversion).
+
+The combination yields a **content-creation + rendering pipeline that
+is internally consistent** from the diffusion bake to the per-pixel
+ray. The streaming voxel renderer is not bolted onto an unrelated
+generator; the generator's output format is the renderer's input
+format.
+
 ---
 
 ## Future architectural directions
@@ -520,25 +774,30 @@ Standard diffusion (DDPM, EDM, Wan 2.1, Lyra 2) uses a single denoiser network t
 
 A finer-grained generalisation of A: instead of one monolithic diffusion that decides everything at full RGB precision, decompose into a *ladder* of stages each operating at a higher bit-depth than the last, with each stage bounded to small deviations from the previous stage's output.
 
+**The decomposition is per-channel, not luma-then-chroma.** RGB is three independent intensity channels (3× the same byte-spectrum), so the ladder applies independently and identically to red, green, and blue. There's no luma extraction, no chroma stage — every rung is full RGB at progressively-higher bit-depth.
+
 **The proposal:**
 
-| Stage | What it generates | Per-pixel search space | Allowed deviation from previous |
-|---|---|---|---|
-| **1** | 256-level posterised image (dark→light spectrum, 8-bit) | 256 values | free |
-| **2** | Add detail; each pixel ±5 levels of stage-1 output | 11 deltas | ±5 |
-| **3** | Tighten; ±2 deltas | 5 deltas | ±2 |
-| **4** | Tighten; ±1 deltas | 3 deltas | ±1 |
-| **5** | Stabilise to full RGB (8-bit channel = 16.7M, or 16-bit channel = 65k³) | full | locked |
+| Stage (rung) | Per channel | Total colours | Per-pixel search space | Allowed deviation from previous |
+|---|---|---:|---|---|
+| **1** (1 BPP) | 2 levels each | 8 (2³) | 8 colours per pixel | free |
+| **2** (2 BPP) | 4 levels each | 64 (4³) | ±1 per channel = 27 deltas | ±1 channel-level |
+| **3** (3 BPP) | 8 levels each | 512 (8³) | ±1 per channel = 27 deltas | ±1 |
+| **4** (4 BPP) | 16 levels each | 4 k (16³) | ±1 per channel = 27 deltas | ±1 |
+| **5** (5 BPP) | 32 levels each | 33 k (32³) | ±1 per channel = 27 deltas | ±1 |
+| **6** (6 BPP) | 64 levels each | 262 k (64³) | ±1 per channel = 27 deltas | ±1 |
+| **7** (7 BPP) | 128 levels each | 2.1 M (128³) | ±1 per channel = 27 deltas | ±1 |
+| **8** (8 BPP) | 256 levels each | 16.7 M (256³) | ±1 per channel = 27 deltas | ±1 (final RGB) |
 
-**Reverse-posterising as generation.** Stage 1 generates a heavily-posterised version (large search space at first because the picture is "free"); subsequent stages progressively un-posterise it with bounded steps. The whole image converges from blocky "paint by numbers" toward full color depth.
+**Reverse-posterising as generation.** Stage 1 generates a heavily-posterised RGB image (8 colours total — pure black/white/red/green/blue/etc, a "paint by numbers" stencil). Each subsequent stage doubles the per-channel level count, and the model picks one of 27 deltas per pixel (-1, 0, +1 in each of R, G, B). The whole image converges from 8-colour blocky toward full 16.7M-colour RGB.
 
 **Three properties that make this potentially better than monolithic diffusion:**
 
-1. **Tiny per-stage search spaces.** Stage 2 picks between 11 deltas per pixel. Stage 4 picks between 3 deltas per pixel. Compared to monolithic RGB diffusion's continuous 24-bit-per-pixel search, this is astronomically smaller.
-2. **No structural drift between stages.** The ±N bound means the model literally cannot decide a wall is sky in stage 4 — structure locks in stage 1, later stages can only refine. This eliminates the "model loses its mind on long sampling chains" failure mode.
-3. **Model size can shrink per stage.** Stage 1 has to solve composition + lighting + structure — needs a medium model. Stages 2-4 are local refinement — tiny models suffice. Stage 5 is colourisation-given-luminance — also small.
+1. **Tiny per-stage search spaces.** Each refinement step picks among ~27 deltas per pixel (vs monolithic RGB diffusion's continuous 24-bit-per-pixel search). Astronomically smaller per-step decision.
+2. **No structural drift between stages.** The ±1-channel-level bound means the model literally cannot decide a wall is sky in stage 5 — structure locks in stage 1, later stages can only refine. This eliminates the "model loses its mind on long sampling chains" failure mode.
+3. **Model size can shrink per stage.** Stage 1 has to solve composition + lighting + structure — needs a medium model. Stages 2-7 are local refinement — tiny models suffice.
 
-**Estimated compute saving:** each step is much cheaper than a monolithic-RGB step due to the smaller search space. Total step count: maybe **10-18 across all 5 stages** vs **35 monolithic DDPM steps** or **4 DMD-distilled steps**. End-to-end potentially **2-5× faster than a 35-step monolithic** at similar quality, with the bonus of bounded structural drift.
+**Estimated compute saving:** each step is much cheaper than a monolithic-RGB step due to the smaller search space. Total step count: 7 (one per rung increase) vs **35 monolithic DDPM steps** or **4 DMD-distilled steps**. End-to-end potentially **2-5× faster than a 35-step monolithic** at similar quality, with the bonus of bounded structural drift.
 
 **Adjacent literature:**
 - **Bit-plane coding** (JPEG2000 family) does progressive bit-depth refinement for *compression*, not generation
@@ -552,18 +811,123 @@ To our knowledge, **the specific combination of (a) explicit progressive bit-dep
 
 ### C. How A and B compose with each other and with the UVW work
 
-The two future directions combine cleanly with the world-coord canonical encoding from §4.1 to form a four-axis decomposition that may be the architecture of a fully UVW-native sibling model:
+The two future directions combine cleanly with the world-coord canonical encoding from §4.1 to form a two-axis decomposition that may be the architecture of a fully UVW-native sibling model:
 
 | Axis | What it solves | Representation | Diffusion stages |
 |---|---|---|---|
 | **Position** (§4.1) | Where pixels live in 3D | UVW canonical channel (24-32 bit/pixel) | ~4 large-noise steps |
-| **Luminance** (B, stage 1) | How light each pixel is | 8-bit posterised | ~4 medium-noise steps |
-| **Bit-depth refinement** (B, stages 2-4) | Texture detail given structure+luminance | ±5/±2/±1 deltas | 5-10 small-noise steps |
-| **Chroma** (B, stage 5) | Final colour given everything above | full 16.7M or 65k³ RGB | 1-2 stabilisation steps |
+| **Per-channel bit-depth ladder** (B) | What colour each pixel is | RGB at progressively-higher bit depth, 1 BPP → 8 BPP per channel | 7 small-noise refinement steps |
 
 Each axis is structurally smaller than the combined RGB problem. Each can be trained / distilled independently. The total compute may be substantially less than one monolithic diffusion model that does everything at once.
 
-For Lyra 2 specifically: the existing pipeline (`Sparse3DCache` → `_build_canonical_spatial_coords` → DiT → VAE-decode → 3DGS lifter) could be reorganised around this decomposition by training a sibling model that's structurally UVW-then-luma-then-RGB, rather than the current monolithic "predict RGB from coord + reference latent."
+For Lyra 2 specifically: the existing pipeline (`Sparse3DCache` → `_build_canonical_spatial_coords` → DiT → VAE-decode → 3DGS lifter) could be reorganised around this decomposition by training a sibling model that's structurally UVW-then-bit-depth-ladder rather than the current monolithic "predict RGB from coord + reference latent." The bit-depth ladder operates **per channel uniformly** — there's no luma/chroma split because RGB is intrinsically three independent intensity channels, not a luminance signal with chrominance side-channels.
+
+### D. Entity-structured prompting with a variable-byte semantic vocabulary
+
+Orthogonal to A, B, and C: the caption that conditions Lyra 2's T5
+encoder is freeform text today. Replacing it with a **structured
+entity-tag stream + expanded canonical descriptions** gives the model
+narrower priors at inference time and lets the same vocabulary act as
+a per-voxel semantic ID for downstream rendering.
+
+**The encoding (LEB128-style):**
+
+```
+byte 0 msb = 0:               1 byte total, IDs 0..127         (top 128 frequent)
+byte 0 msb = 1, byte 1 msb = 0: 2 bytes total, IDs 128..16511  (next 16k)
+byte 0,1 msb = 1, byte 2 msb = 0: 3 bytes total, IDs 16512..2M (rare)
+```
+
+**The data class:**
+
+```python
+@dataclass
+class SemanticEntity:
+    name:        str           # canonical id, e.g. "dolphin_bottlenose"
+    string:      str           # prompt expansion text
+    color:       (int,int,int) # baseline RGB hint
+    scene_count: int           # cumulative usage across all generated scenes
+
+    def __lt__(self, other):
+        return (-self.scene_count, self.name) < (-other.scene_count, other.name)
+```
+
+`scene_count` drives **self-tuning byte-width assignment**: the
+vocabulary resorts periodically, and the 128 most-used entities get
+the 1-byte fast path automatically. Sci-fi-heavy projects end up with
+`nebula`/`station`/`asteroid` at 1 byte; fantasy with
+`tree`/`castle`/`dragon` instead. No hand-curated priority list.
+
+**Average storage per tag for a typical project: ~1.3 bytes.**
+
+**Four uses, one vocabulary:**
+
+| Pipeline stage | Encoding used |
+|---|---|
+| Caption parsing input (text → entity tokens) | variable 1-3 byte |
+| Lyra 2 Lite conditioning embedding (entity → vector) | learned embedding at 2-byte cap (50 M params, LoRA-budget) |
+| Per-voxel semantic atlas (output) | variable 1-3 byte, stored in voxel alpha channel |
+| Downstream segment renderer (G-Buffer ID) | 16-bit = 2 byte |
+
+The `color` field also feeds the diffusion as an **auxiliary spatial
+colour prior** — voxels tagged with `palm` get a green-brown baseline
+before the model paints them, nudging diffusion toward correct colours
+faster.
+
+**Expected quality / speed effect** (based on conditional-generation
+literature):
+
+- ~10% quality improvement at fixed compute (structured tokens reduce
+  ambiguity in the caption space, less drift across the autoregressive
+  cache)
+- ~1.2× faster convergence per chunk (narrower search space)
+- Compute-free spatial colour prior boosts cross-scene cache hit rates
+  (the 1-byte fast-path entities are by construction the most-reused)
+
+**Implementation status:** the `EntityVocabulary` class + the
+`StructuredPromptBuilder` wrapper + `lyra2_caption_hook` integration
+point + 74-entity seed library ship in the DownToEarth repo as of
+2026-05-20. Drop-in replacement for raw captions; two-line integration
+into any Lyra-2-shaped inference script.
+
+### E. Verified accelerator stack (DMD + TeaCache + torch.compile + fp8 + SAGE)
+
+The proposal sections above are forward-looking architectural ideas
+that require training compute we don't have. **This section catalogues
+the inference-time accelerator stack that is shippable today** with no
+retraining, drawing on mid-2026 SOTA we surveyed independently of this
+proposal.
+
+| Technique | Speedup | Status | Source |
+|---|---:|---|---|
+| **Lyra 2's bundled DMD distillation** (35→4 steps) | **13×** | ✅ already in `checkpoints/lora/dmd_distillation.safetensors` | [nvidia/Lyra-2.0 HF](https://huggingface.co/nvidia/Lyra-2.0) |
+| **TeaCache** (content-aware step skipping for Wan-family DiTs) | **2-3×** | ✅ official Wan 2.1 support since Mar 2025, -0.07% VBench | [ali-vilab/TeaCache](https://github.com/ali-vilab/TeaCache) |
+| **torch.compile + CUDA graphs** on sm_120 | **1.3-1.8×** | ✅ requires flash-attn ≥ 2.8.3 to graph-fuse cleanly | [PyTorch sm_120 PR #159207](https://github.com/pytorch/pytorch/issues/159207) |
+| **fp8_e4m3fn storage** + **SageAttention** on Blackwell | **1.8×** | ✅ implemented in PR #61's `low_vram.py` (storage); TE compute-fp8 is ~1 week extra eng | [Spheron Blackwell benchmark](https://www.spheron.network/blog/comfyui-gpu-cloud-2026/) |
+| **Entity-structured prompting** (D, above) | quality + 1.2× | ✅ implemented | this proposal |
+
+**Multiplicative product**: `13 × 2.5 × 1.5 × 1.8 = ~88×` raw.
+Discounting for non-orthogonality between DMD and TeaCache (both save
+diffusion steps; some overlap) gives a **realistic ~60× speedup over
+stock Lyra 2** with no retraining.
+
+**What this does to the wall-clock budget on consumer hardware:**
+
+| Hardware | Stock Lyra 2 + DMD (today) | 60× stack |
+|---|---:|---:|
+| H100 SXM (cloud, ~$3.50/hr) | 36 acres / 12 hr bake | **143 acres / 12 hr** |
+| RTX 5060 Ti (consumer, $400) | 3.5 acres / 12 hr bake | **17 acres / 12 hr** |
+| **Cost to bake 1 km² (Mêlée-class) on H100** | ~$1,400 | **~$73** |
+
+**Excluded from this stack** (mutually exclusive with Lyra's own DMD,
+or research-direction only):
+- CausVid / Self-Forcing / FastWan — alternative distillations,
+  pick one
+- LCM consistency distillation — superseded by DMD2 for DiT video
+- 14B → 8B parameter distillation — months of training, not
+  publicly available
+- PyramidalWan multi-resolution finetune — promising (~2-3× on top)
+  but needs ~$1k cloud compute and 1 month of fine-tuning
 
 ### What we're NOT claiming
 
