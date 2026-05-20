@@ -2,13 +2,14 @@
 #
 # Root → photoreal scene demo (Juggernaut XL → 167k Gaussians). The flagship.
 # /uvw  → procedural UVW bijection demo (explains the data structure).
-# /atlas → same.
-# /readme → markdown-rendered README.
-# /docs → same.
+# /atlas → same as /uvw.
+# /docs → markdown-rendered README at /readme (the .html ext is auto-stripped
+#         by Cloudflare so readme.html is reachable at /readme directly).
 #
 # Cloudflare auto-strips .html, so all targets use canonical extensionless URLs.
+# Don't redirect /readme to /readme — that's a self-loop. Just rely on the
+# auto-strip behaviour to serve readme.html at the /readme path.
 /        /scene_demo  302
 /uvw     /uvw_demo    302
 /atlas   /uvw_demo    302
-/readme  /readme      302
 /docs    /readme      302
