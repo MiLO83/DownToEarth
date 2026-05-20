@@ -16,13 +16,18 @@
 /proposal  /readme.html?src=/LYRA2_PROPOSAL.md      302
 /lyra2     /readme.html?src=/LYRA2_PROPOSAL.md      302
 /rfc       /readme.html?src=/LYRA2_PROPOSAL.md      302
-/dummies   /readme.html?src=/DUMMIES.md             302
-/explain   /readme.html?src=/DUMMIES.md             302
-/plain     /readme.html?src=/DUMMIES.md             302
+/dummies     /readme.html?src=/DUMMIES.md             302
+/explain     /readme.html?src=/DUMMIES.md             302
+/plain       /readme.html?src=/DUMMIES.md             302
+/dummiesv3   /readme.html?src=/DUMMIESV3.md           302
+/v3          /readme.html?src=/DUMMIESV3.md           302
+/compare     /readme.html?src=/DUMMIESV3.md           302
 
 # Lowercase PDF aliases for friendly URLs (the .pdf files are served
 # directly as static assets at their actual case-sensitive paths).
-/readme.pdf    /README.pdf            302
-/proposal.pdf  /LYRA2_PROPOSAL.pdf    302
-/lyra2.pdf     /LYRA2_PROPOSAL.pdf    302
-/dummies.pdf   /DUMMIES.pdf           302
+/readme.pdf      /README.pdf            302
+/proposal.pdf    /LYRA2_PROPOSAL.pdf    302
+/lyra2.pdf       /LYRA2_PROPOSAL.pdf    302
+/dummies.pdf     /DUMMIES.pdf           302
+/dummiesv3.pdf   /DUMMIESV3.pdf         302
+/compare.pdf     /DUMMIESV3.pdf         302
