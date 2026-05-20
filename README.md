@@ -1,5 +1,11 @@
 # Down To Earth
 
+> 🤝 **Upstream contribution — [`nv-tlabs/lyra#61`](https://github.com/nv-tlabs/lyra/pull/61)** — *draft RFC*
+>
+> Architectural proposal filed against NVIDIA Toronto's Lyra 2 repo: shift the canonical-coord conditioning from frame-keyed `(u, v, frame_slot)` to a bidirectional world-coord ↔ RGB atlas. 312 lines of opt-in patches, DCO-signed, byte-identity-preserving in the default path. Includes a free wall-clock win for `Sparse3DCache.retrieve()` (the `octant_prefilter` kwarg) that requires no retraining and could land on its own.
+>
+> Full writeup: [LYRA2_PROPOSAL.md](LYRA2_PROPOSAL.md) · PDF: [LYRA2_PROPOSAL.pdf](https://downtoearth-9lq.pages.dev/LYRA2_PROPOSAL.pdf)
+
 > 🎮 **Live demos:**
 > - 🖼️ **Photoreal scene** (flagship): https://downtoearth-9lq.pages.dev
 >   *(167,192 colored Gaussians, baked from a single Juggernaut XL render
