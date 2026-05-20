@@ -52,9 +52,10 @@ $GitUserEmail   = "edisonzghost@gmail.com"
 # All three docs assume markdown at $RepoRoot\<source> and the public-dir
 # copy at $PublicDir\<source>.
 $Docs = @(
-    @{ Md = "README.md";          Url = "$BaseUrl/readme";   Pdf = "README.pdf" },
-    @{ Md = "LYRA2_PROPOSAL.md";  Url = "$BaseUrl/proposal"; Pdf = "LYRA2_PROPOSAL.pdf" },
-    @{ Md = "DUMMIES.md";         Url = "$BaseUrl/dummies";  Pdf = "DUMMIES.pdf" }
+    @{ Md = "README.md";          Url = "$BaseUrl/readme";    Pdf = "README.pdf" },
+    @{ Md = "LYRA2_PROPOSAL.md";  Url = "$BaseUrl/proposal";  Pdf = "LYRA2_PROPOSAL.pdf" },
+    @{ Md = "DUMMIES.md";         Url = "$BaseUrl/dummies";   Pdf = "DUMMIES.pdf" },
+    @{ Md = "DUMMIESV3.md";       Url = "$BaseUrl/dummiesv3"; Pdf = "DUMMIESV3.pdf" }
 )
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
