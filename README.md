@@ -613,10 +613,18 @@ Loads directly from voxgaussian's sparse histogram dict via
 #### Extension: 2-bit-per-voxel for demand-driven streaming (2026-05-20)
 
 The bitmap class now also supports a **2-bit mode** that carries
-occupancy *and* a per-frame "ray-touched" bit. Pass `bits_per_voxel=2`
-at construction. Storage doubles (4 MB at 4096² atlas — still trivial),
-and the runtime gains a precise log of which voxels actually
-contributed to a pixel that frame.
+occupancy *and* a per-frame "render-flag" bit (touched by a ray this
+frame). Pass `bits_per_voxel=2` at construction. Storage doubles (4 MB
+at 4096² atlas — still trivial), and the runtime gains a precise log
+of which voxels actually contributed to a pixel that frame.
+
+**The render-flag is bijection-keyed.** The render-flag bit for voxel
+`(u, v, w)` lives at the **same atlas address** as that voxel's RGBA
+data — both addressed via the UVW↔RGB bijection. A single
+`voxel_to_atlas(u, v, w)` call gives the raymarcher one coordinate
+that serves both the colour read and the flag write. New voxel-coord
+helpers (`set_by_voxel`, `set_touched_by_voxel`, etc.) make this
+bijection use first-class in the API.
 
 ```python
 bmap = OccupancyBitmap(atlas_w=4096, atlas_h=4096, bits_per_voxel=2)

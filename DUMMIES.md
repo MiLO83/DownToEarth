@@ -598,6 +598,16 @@ doorbell, but still 12× smaller than the original colour data. ✅
 both modes (1-bit and 2-bit) via a constructor option. The 2-bit mode
 is what runtime virtual-reality rendering would use.
 
+There's one more piece of cleverness worth surfacing: **the "did
+anyone look here" bit lives at the same address as the spot's
+colour.** Remember the whole project's headline trick — the spot's
+*colour* IS its *address* in the map. Well, the spot's "did anyone
+look here" flag is *also* stored at that same address. So when the
+computer hits a spot during drawing, **one address lookup gives it
+both the colour to paint AND the slot to mark as 'just looked at.'**
+One trip to the index, two answers. Cheap and elegant — exactly the
+shape of payoff the original colour-coord map was built for.
+
 ---
 
 ## 9. So... did it actually work?

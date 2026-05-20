@@ -498,6 +498,17 @@ per voxel** so each voxel slot carries occupancy AND a per-frame
 and the runtime gains a precise log of which voxels actually contributed
 to a pixel that frame.
 
+**Crucially, the render-flag bit lives at the same atlas address as
+the voxel's RGBA data, keyed by the UVW bijection from §3.** The
+runtime raymarcher computes one `voxel_to_atlas(u, v, w)` lookup per
+ray hit; that single atlas coordinate then serves both reads (sample
+the voxel's RGBA from the main atlas) and writes (set the render-flag
+bit in the occupancy/touched bitmap via `imageAtomicOr`). The two
+bitmaps share an address space because **the byte triple that names
+the voxel is the same triple that addresses both its data and its
+flag**. This is the runtime payoff of the bijection: one lookup, two
+uses, zero indirection.
+
 Bit layout per byte (4 voxels packed):
 ```
 voxel n at byte (n>>2), bits ((n&3)*2)  occupancy
@@ -569,10 +580,15 @@ bijection (each voxel address is a fixed byte triple, so the touched
 bitmap is the same memory layout as the atlas itself), but the
 demand-driven pattern itself is well-established.
 
-**Implementation status:** the 2-bit mode is shipped in PR #61's
-`OccupancyBitmap` class as of 2026-05-20. The shader-side
-`imageAtomicOr` wiring is in scope for future PRs once a runtime
-voxel renderer is integrated.
+**Implementation status:** shipped in PR #61 as of 2026-05-20 across
+two commits — `38907b3` adds the 2-bit OccupancyBitmap mode (occupancy
++ render-flag, masked-AND clear, OR-reduce to chunk granularity) plus
+the CPU-first model_loader path that makes int8 Lyra 2 inference
+actually fit on 16 GB GPUs; `05670ec` adds first-class voxel-coord
+helpers (`set_by_voxel`, `set_touched_by_voxel`, etc.) so the API
+explicitly uses the UVW bijection rather than raw atlas indices. The
+shader-side `imageAtomicOr` wiring is in scope for future PRs once a
+runtime voxel renderer is integrated.
 
 ### Why this matters: TB-scale worlds on 16 GB VRAM
 
